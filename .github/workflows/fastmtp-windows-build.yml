@@ -1,0 +1,80 @@
+# fastmtp-windows-build.yml
+# ---------------------------------------------------------------
+# Builds llama.cpp (FastMTP patch) for Windows + CUDA, RTX 2080 Ti,
+# portable CPU codegen (no AVX2 needed - safe on pre-2013 CPUs).
+#
+# HOW TO USE (no local compile - GitHub builds it for you):
+#   1. Create a free GitHub account (if you don't have one).
+#   2. Go to https://github.com/ggml-org/llama.cpp  ->  click Fork
+#   3. In YOUR fork: Add file -> Upload files -> upload THIS file at
+#      .github/workflows/fastmtp-windows-build.yml  -> commit
+#   4. Open the "Actions" tab -> "fastmtp-windows-cuda" -> Run workflow
+#   5. Wait ~20-40 min. When green, click the run -> "Artifacts" ->
+#      download "llama-fastmtp-win-cuda" (a zip with the exes + DLLs)
+#   6. Unzip into C:\Users\elmas\Downloads\llama-fastmtp\build\bin\Release\
+#      (that is where qwen38-27b-2080ti.bat looks for it), or point
+#      FASTMTP_EXE at wherever you unzip it.
+# ---------------------------------------------------------------
+
+name: fastmtp-windows-cuda
+
+on:
+  workflow_dispatch:
+    inputs:
+      cuda:
+        description: "CUDA Toolkit version"
+        default: "12.6.0"
+      arch:
+        description: "CUDA arch (75 = RTX 20 Ti / 2080 Ti)"
+        default: "75"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout llama.cpp at the FastMTP base commit
+        uses: actions/checkout@v4
+        with:
+          ref: 4df29be4f4c3673f428170fda944a5b19f743bb8
+
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.21
+        with:
+          cuda: ${{ inputs.cuda }}
+          method: network
+
+      - name: Apply HauhauCS FastMTP patch
+        shell: pwsh
+        run: |
+          curl.exe -L -o fastmtp.patch "https://huggingface.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF/resolve/main/HauhauCS-FastMTP-llama.cpp.patch"
+          git apply fastmtp.patch
+
+      - name: Configure (portable CPU = old-CPU safe, GPU does the work)
+        run: >
+          cmake -S . -B build
+          -DGGML_CUDA=ON
+          -DCMAKE_CUDA_ARCHITECTURES=${{ inputs.arch }}
+          -DGGML_NATIVE=OFF
+          -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release -j 4
+
+      - name: Collect exes + CUDA DLLs
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item build\bin\Release\llama-server.exe dist\
+          Copy-Item build\bin\Release\llama-cli.exe dist\
+          Copy-Item build\bin\Release\llama-bench.exe dist\
+          Get-ChildItem "$env:CUDA_PATH\bin\cudart64_*.dll" | Copy-Item -Destination dist\
+          Get-ChildItem "$env:CUDA_PATH\bin\cublas64_*.dll"  | Copy-Item -Destination dist\
+          Get-ChildItem "$env:CUDA_PATH\bin\cublasLt64_*.dll" | Copy-Item -Destination dist\
+          Get-ChildItem dist | Format-Table Name,Length
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-fastmtp-win-cuda
+          path: dist/
+          retention-days: 30
