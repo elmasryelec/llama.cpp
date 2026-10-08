@@ -1,84 +1,87 @@
-# fastmtp-windows-build.yml  (v2 - fixes "No CUDA toolset found" + AVX2-only CPU bug)
-
+# fastmtp-windows-build.yml (v3)
+# v3 fix over v2: full default CUDA install (filtered sub-packages
+# missed cublas_dev -> "CUDA::cublas not found").
+# v2 fixes over v1: windows-2022 runner, CUDA toolset registration
+# fallback, baseline CPU SIMD flags (v1 built /arch:AVX2 -> crash
+# on the Phenom II).
+#
+# HOW TO USE:
+# 1. In your fork: .github/workflows/fastmtp-windows-build.yml
+# 2. Replace the WHOLE file content with this, commit.
+# 3. Actions tab -> "fastmtp-windows-cuda" -> Run workflow.
+# 4. When green: run page -> Artifacts -> download "llama-fastmtp-win-cuda".
+# 5. Unzip into C:\Users\elmas\Downloads\llama-fastmtp\build\bin\Release\
 name: fastmtp-windows-cuda
-
 on:
-  workflow_dispatch:
-    inputs:
-      cuda:
-        description: "CUDA Toolkit version"
-        default: "12.6.0"
-
+ workflow_dispatch:
+ inputs:
+ cuda:
+ description: "CUDA Toolkit version"
+ default: "12.6.0"
 jobs:
-  build:
-    # VS 2022 on purpose: CUDA 12.6's VS integration does NOT register
-    # with the VS 18 2026 that windows-latest ships.
-    runs-on: windows-2022
-
-    steps:
-      - name: Checkout llama.cpp at the FastMTP base commit
-        uses: actions/checkout@v4
-        with:
-          ref: 4df29be4f4c3673f428170fda944a5b19f743bb8
-
-      - name: Install CUDA Toolkit (with VS integration component)
-        uses: Jimver/cuda-toolkit@v0.2.21
-        with:
-          cuda: ${{ inputs.cuda }}
-          method: network
-          sub-packages: '["nvcc", "cudart", "cublas", "visual_studio_integration"]'
-
-      - name: Register CUDA toolset with MSVC (fallback copy)
-        shell: pwsh
-        run: |
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-          $dst = Join-Path $vs "MSBuild\Microsoft\VC\v170\BuildCustomizations"
-          $src = "$env:CUDA_PATH\extras\visual_studio_integration\MSBuildExtensions"
-          if (Test-Path $src) {
-            New-Item -ItemType Directory -Force $dst | Out-Null
-            Copy-Item "$src\*" $dst -Force
-            Write-Host "CUDA MSBuild props copied to $dst"
-          } else {
-            Write-Host "MSBuildExtensions not at $src - integration likely registered already"
-          }
-
-      - name: Apply HauhauCS FastMTP patch
-        shell: pwsh
-        run: |
-          curl.exe -L -o fastmtp.patch "https://huggingface.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF/resolve/main/HauhauCS-FastMTP-llama.cpp.patch"
-          git apply fastmtp.patch
-
-      - name: Configure (baseline CPU codegen - safe on pre-AVX2 CPUs)
-        run: >
-          cmake -S . -B build
-          -DGGML_CUDA=ON
-          -DCMAKE_CUDA_ARCHITECTURES=75
-          -DGGML_NATIVE=OFF
-          -DGGML_AVX=OFF
-          -DGGML_AVX2=OFF
-          -DGGML_FMA=OFF
-          -DGGML_F16C=OFF
-          -DGGML_BMI2=OFF
-          -DGGML_SSE42=OFF
-          -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build
-        run: cmake --build build --config Release -j 4
-
-      - name: Collect exes + all DLLs
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item build\bin\Release\*.exe dist\
-          Copy-Item build\bin\Release\*.dll dist\
-          Get-ChildItem "$env:CUDA_PATH\bin\cudart64_*.dll"  | Copy-Item -Destination dist\
-          Get-ChildItem "$env:CUDA_PATH\bin\cublas64_*.dll"  | Copy-Item -Destination dist\
-          Get-ChildItem "$env:CUDA_PATH\bin\cublasLt64_*.dll" | Copy-Item -Destination dist\
-          Get-ChildItem dist | Format-Table Name,Length
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: llama-fastmtp-win-cuda
-          path: dist/
-          retention-days: 30
+ build:
+ # VS 2022 on purpose: CUDA 12.6's VS integration does NOT register
+ # with the VS 18 2026 that windows-latest ships.
+ runs-on: windows-2022
+ steps:
+ - name: Checkout llama.cpp at the FastMTP base commit
+ uses: actions/checkout@v4
+ with:
+ ref: 4df29be4f4c3673f428170fda944a5b19f743bb8
+ - name: Install CUDA Toolkit (full default install)
+ uses: Jimver/cuda-toolkit@v0.2.21
+ with:
+ cuda: ${{ inputs.cuda }}
+ method: network
+ # full install on purpose: a filtered sub-packages list installed
+ # only the cuBLAS runtime and CMake then missed CUDA::cublas
+ # (needs the cublas_dev import libs). Green first, narrow later.
+ - name: Register CUDA toolset with MSVC (fallback copy)
+ shell: pwsh
+ run: |
+ $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+ $dst = Join-Path $vs "MSBuild\Microsoft\VC\v170\BuildCustomizations"
+ $src = "$env:CUDA_PATH\extras\visual_studio_integration\MSBuildExtensions"
+ if (Test-Path $src) {
+ New-Item -ItemType Directory -Force $dst | Out-Null
+ Copy-Item "$src\*" $dst -Force
+ Write-Host "CUDA MSBuild props copied to $dst"
+ } else {
+ Write-Host "MSBuildExtensions not at $src - integration likely registered already"
+ }
+ - name: Apply HauhauCS FastMTP patch
+ shell: pwsh
+ run: |
+ curl.exe -L -o fastmtp.patch "https://huggingface.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF/resolve/main/HauhauCS-FastMTP-llama.cpp.patch"
+ git apply fastmtp.patch
+ - name: Configure (baseline CPU codegen - safe on pre-AVX2 CPUs)
+ run: >
+ cmake -S . -B build
+ -DGGML_CUDA=ON
+ -DCMAKE_CUDA_ARCHITECTURES=75
+ -DGGML_NATIVE=OFF
+ -DGGML_AVX=OFF
+ -DGGML_AVX2=OFF
+ -DGGML_FMA=OFF
+ -DGGML_F16C=OFF
+ -DGGML_BMI2=OFF
+ -DGGML_SSE42=OFF
+ -DCMAKE_BUILD_TYPE=Release
+ - name: Build
+ run: cmake --build build --config Release -j 4
+ - name: Collect exes + all DLLs
+ shell: pwsh
+ run: |
+ New-Item -ItemType Directory -Force dist | Out-Null
+ Copy-Item build\bin\Release\*.exe dist\
+ Copy-Item build\bin\Release\*.dll dist\
+ Get-ChildItem "$env:CUDA_PATH\bin\cudart64_*.dll" | Copy-Item -Destination dist\
+ Get-ChildItem "$env:CUDA_PATH\bin\cublas64_*.dll" | Copy-Item -Destination dist\
+ Get-ChildItem "$env:CUDA_PATH\bin\cublasLt64_*.dll" | Copy-Item -Destination dist\
+ Get-ChildItem dist | Format-Table Name,Length
+ - name: Upload artifact
+ uses: actions/upload-artifact@v4
+ with:
+ name: llama-fastmtp-win-cuda
+ path: dist/
+ retention-days: 30
