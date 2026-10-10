@@ -1,18 +1,31 @@
-# fastmtp-windows-build.yml  (v3.1 - validated clean YAML)
-# ---------------------------------------------------------------
-# v3 fix over v2: full default CUDA install (filtered sub-packages
-#   missed cublas_dev -> "CUDA::cublas not found").
-# v2 fixes over v1: windows-2022 runner, CUDA toolset registration
-#   fallback, baseline CPU SIMD flags (v1 built /arch:AVX2 -> crash
-#   on the Phenom II).
+# fastmtp-windows-build.yml  (v4 - FastMTP + DFlash2-master + BeeLlama)
+# ---------------------------------------------------------------------
+# v4 over v3.1: two NEW build jobs next to the original FastMTP job.
+#   Job "fastmtp-windows-cuda"   - unchanged: HauhauCS FastMTP patch on the
+#       old base commit. Keep it: it is the only engine that runs your
+#       aggressive MTP GGUF with --spec-type draft-mtp.
+#   Job "dflash2-master-cuda"    - NEW: current ggml-org/llama.cpp master.
+#       DFlash2 is UPSTREAM since 2026-08-27 (PR #27816 -> commit b10f9ca58c,
+#       first tagged build b10658). No patching needed. This engine unlocks
+#       the presets `dflash2` and `stack` in llm-studio v8.2
+#       (--spec-type draft-dflash,ngram-mod,ngram-map-k4v).
+#   Job "beellama-cuda"          - NEW: Anbeeld/beellama.cpp (performance
+#       fork). Unlocks KVarN KV caches (kvarn3..kvarn8), --kv-tail-tokens
+#       precision tail, low-bit q2/q3/q6 caches and adaptive DFlash
+#       draft-max. Drop-in llama-server, same flags plus extras.
 #
-# HOW TO USE (recommend UPLOADING this file, not copy-paste):
-#   1. In your fork: .github/workflows/fastmtp-windows-build.yml
-#   2. Replace the whole file with THIS FILE (Add file -> Upload).
-#   3. Actions tab -> "fastmtp-windows-cuda" -> Run workflow.
-#   4. When green: run page -> Artifacts -> "llama-fastmtp-win-cuda".
-#   5. Unzip into C:\Users\elmas\Downloads\llama-fastmtp\build\bin\Release\
-# ---------------------------------------------------------------
+# HOW TO USE:
+#   1. In your fork: .github/workflows/fastmtp-windows-build.yml  (replace)
+#   2. Actions tab -> run the workflow. All three jobs can run in parallel
+#      (each has its own artifact).
+#   3. Download each artifact into its own folder, e.g.
+#        C:\Users\elmas\Downloads\llama-fastmtp-win-cuda\     (FastMTP)
+#        C:\Users\elmas\Downloads\llama-master-dflash2\       (DFlash2)
+#        C:\Users\elmas\Downloads\llama-beellama\             (BeeLlama)
+#      llm-studio `engines` auto-scans and one-click switches between them.
+#
+# CPU NOTE: GGML_NATIVE/AVX2 stay OFF on purpose - the host CPU is pre-AVX2
+# and v1 crashed on it. The GPU does the work anyway.
 
 name: fastmtp-windows-cuda
 
@@ -23,22 +36,31 @@ on:
         description: "CUDA Toolkit version"
         type: string
         default: "12.6.0"
+      cuda_arch:
+        description: "CMAKE_CUDA_ARCHITECTURES (75=Turing, 86=Ampere, 89=Ada, 120a=Blackwell)"
+        type: string
+        default: "75"
+      llamacpp_ref:
+        description: "llama.cpp ref for the dflash2 job (>= b10658 / master)"
+        type: string
+        default: "master"
+      beellama_ref:
+        description: "beellama.cpp ref"
+        type: string
+        default: "main"
 
 jobs:
+  # ==================================================================
+  # Job 1 - FastMTP (unchanged from v3.1)
+  # ==================================================================
   build:
-    # VS 2022 on purpose: CUDA 12.6's VS integration does NOT register
-    # with the VS 18 2026 that windows-latest ships.
     runs-on: windows-2022
-
     steps:
       - name: Checkout llama.cpp at the FastMTP base commit
         uses: actions/checkout@v4
         with:
           ref: 4df29be4f4c3673f428170fda944a5b19f743bb8
 
-      # full default CUDA install on purpose: a filtered sub-packages
-      # list installed only the cuBLAS runtime and CMake then missed
-      # CUDA::cublas (needs the cublas_dev import libs).
       - name: Install CUDA Toolkit (full default install)
         uses: Jimver/cuda-toolkit@v0.2.21
         with:
@@ -69,7 +91,7 @@ jobs:
         run: >
           cmake -S . -B build
           -DGGML_CUDA=ON
-          -DCMAKE_CUDA_ARCHITECTURES=75
+          -DCMAKE_CUDA_ARCHITECTURES=${{ inputs.cuda_arch }}
           -DGGML_NATIVE=OFF
           -DGGML_AVX=OFF
           -DGGML_AVX2=OFF
@@ -97,5 +119,140 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: llama-fastmtp-win-cuda
+          path: dist/
+          retention-days: 30
+
+  # ==================================================================
+  # Job 2 - upstream llama.cpp master (DFlash2 + n-gram speculators)
+  # ==================================================================
+  dflash2-master:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout ggml-org/llama.cpp master
+        uses: actions/checkout@v4
+        with:
+          repository: ggml-org/llama.cpp
+          ref: ${{ inputs.llamacpp_ref }}
+
+      - name: Install CUDA Toolkit (full default install)
+        uses: Jimver/cuda-toolkit@v0.2.21
+        with:
+          cuda: ${{ inputs.cuda }}
+          method: network
+
+      - name: Register CUDA toolset with MSVC (fallback copy)
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $dst = Join-Path $vs "MSBuild\Microsoft\VC\v170\BuildCustomizations"
+          $src = "$env:CUDA_PATH\extras\visual_studio_integration\MSBuildExtensions"
+          if (Test-Path $src) {
+            New-Item -ItemType Directory -Force $dst | Out-Null
+            Copy-Item "$src\*" $dst -Force
+            Write-Host "CUDA MSBuild props copied to $dst"
+          } else {
+            Write-Host "MSBuildExtensions not at $src - integration likely registered already"
+          }
+
+      - name: Configure (baseline CPU codegen - safe on pre-AVX2 CPUs)
+        run: >
+          cmake -S . -B build
+          -DGGML_CUDA=ON
+          -DCMAKE_CUDA_ARCHITECTURES=${{ inputs.cuda_arch }}
+          -DGGML_NATIVE=OFF
+          -DGGML_AVX=OFF
+          -DGGML_AVX2=OFF
+          -DGGML_FMA=OFF
+          -DGGML_F16C=OFF
+          -DGGML_BMI2=OFF
+          -DGGML_SSE42=OFF
+          -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release -j 4
+
+      - name: Collect exes + all DLLs
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item build\bin\Release\*.exe dist\
+          Copy-Item build\bin\Release\*.dll dist\
+          Get-ChildItem "$env:CUDA_PATH\bin\cudart64_*.dll"  | Copy-Item -Destination dist\
+          Get-ChildItem "$env:CUDA_PATH\bin\cublas64_*.dll"  | Copy-Item -Destination dist\
+          Get-ChildItem "$env:CUDA_PATH\bin\cublasLt64_*.dll" | Copy-Item -Destination dist\
+          Get-ChildItem dist | Format-Table Name,Length
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-master-dflash2-win-cuda
+          path: dist/
+          retention-days: 30
+
+  # ==================================================================
+  # Job 3 - BeeLlama (KVarN KV, kv-tail, adaptive draft-max)
+  # ==================================================================
+  beellama:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout Anbeeld/beellama.cpp
+        uses: actions/checkout@v4
+        with:
+          repository: Anbeeld/beellama.cpp
+          ref: ${{ inputs.beellama_ref }}
+
+      - name: Install CUDA Toolkit (full default install)
+        uses: Jimver/cuda-toolkit@v0.2.21
+        with:
+          cuda: ${{ inputs.cuda }}
+          method: network
+
+      - name: Register CUDA toolset with MSVC (fallback copy)
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $dst = Join-Path $vs "MSBuild\Microsoft\VC\v170\BuildCustomizations"
+          $src = "$env:CUDA_PATH\extras\visual_studio_integration\MSBuildExtensions"
+          if (Test-Path $src) {
+            New-Item -ItemType Directory -Force $dst | Out-Null
+            Copy-Item "$src\*" $dst -Force
+            Write-Host "CUDA MSBuild props copied to $dst"
+          } else {
+            Write-Host "MSBuildExtensions not at $src - integration likely registered already"
+          }
+
+      - name: Configure (BeeLlama - CUDA + FlashAttention incl. KVarN kernels)
+        run: >
+          cmake -S . -B build
+          -DGGML_CUDA=ON
+          -DGGML_CUDA_FA=ON
+          -DCMAKE_CUDA_ARCHITECTURES=${{ inputs.cuda_arch }}
+          -DGGML_NATIVE=OFF
+          -DGGML_AVX=OFF
+          -DGGML_AVX2=OFF
+          -DGGML_FMA=OFF
+          -DGGML_F16C=OFF
+          -DGGML_BMI2=OFF
+          -DGGML_SSE42=OFF
+          -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release -j 4
+
+      - name: Collect exes + all DLLs
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item build\bin\Release\*.exe dist\
+          Copy-Item build\bin\Release\*.dll dist\
+          Get-ChildItem "$env:CUDA_PATH\bin\cudart64_*.dll"  | Copy-Item -Destination dist\
+          Get-ChildItem "$env:CUDA_PATH\bin\cublas64_*.dll"  | Copy-Item -Destination dist\
+          Get-ChildItem "$env:CUDA_PATH\bin\cublasLt64_*.dll" | Copy-Item -Destination dist\
+          Get-ChildItem dist | Format-Table Name,Length
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: beellama-win-cuda
           path: dist/
           retention-days: 30
