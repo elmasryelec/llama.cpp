@@ -1,28 +1,42 @@
-# fastmtp-windows-build.yml  (v4 - FastMTP + DFlash2-master + BeeLlama)
+# fastmtp-windows-build.yml  (v5 - FastMTP + UNIFIED BeeLlama/DFlash2)
 # ---------------------------------------------------------------------
-# v4 over v3.1: two NEW build jobs next to the original FastMTP job.
-#   Job "fastmtp-windows-cuda"   - unchanged: HauhauCS FastMTP patch on the
-#       old base commit. Keep it: it is the only engine that runs your
-#       aggressive MTP GGUF with --spec-type draft-mtp.
-#   Job "dflash2-master-cuda"    - NEW: current ggml-org/llama.cpp master.
-#       DFlash2 is UPSTREAM since 2026-08-27 (PR #27816 -> commit b10f9ca58c,
-#       first tagged build b10658). No patching needed. This engine unlocks
-#       the presets `dflash2` and `stack` in llm-studio v8.2
-#       (--spec-type draft-dflash,ngram-mod,ngram-map-k4v).
-#   Job "beellama-cuda"          - NEW: Anbeeld/beellama.cpp (performance
-#       fork). Unlocks KVarN KV caches (kvarn3..kvarn8), --kv-tail-tokens
-#       precision tail, low-bit q2/q3/q6 caches and adaptive DFlash
-#       draft-max. Drop-in llama-server, same flags plus extras.
+# v5 over v4: the old "dflash2-master" and "beellama" jobs are MERGED into
+# one unified engine. BeeLlama (Anbeeld/beellama.cpp) is upstream llama.cpp
+# + a small fork surface, and upstream DFlash2 (PR #27816 -> b10658+) is
+# included in it. One binary now has ALL of:
+#
+#   * --spec-type draft-dflash + external DFlash2 draft GGUF   (presets
+#     `dflash2` and `stack` in llm-studio, incl. ngram-mod,ngram-map-k4v)
+#   * KVarN KV caches  kvarn2..kvarn8 (--cache-type-k/v, also for the draft
+#     cache via --spec-draft-type-k/v)
+#   * low-bit caches   q2_0/q2_1/q3_0/q3_1/q6_0/q6_1
+#   * KV precision tail  --kv-tail-tokens / --kv-tail-type
+#   * adaptive draft-max  --spec-dm-controller profit|off + --spec-dm-profit-*
+#   * -ubd draft micro-batch, reasoning-loop protection, prompt-cache rework
+#
+# The old upstream-master job is gone on purpose: BeeLlama tracks upstream
+# closely ("small fork surface"), so it unlocks the same preset surface plus
+# the Bee extras. If you ever need a pure-upstream reference build for A/B
+# numbers, re-add a job with repository ggml-org/llama.cpp - nothing else
+# changes.
+#
+# KEEP the FastMTP job: the HauhauCS patch on the old base commit is still
+# the only engine that runs the aggressive MTP GGUF with --spec-type
+# draft-mtp (Bee's owned-Qwen-MTP allowlist fails closed on it).
+#
+# ADAPTIVE DRAFT-MAX CAVEAT: Bee's profit controller adapts the draft horizon
+# for DFlash1 drafters. DFlash2 always uses its fixed trained block limit
+# (block_size - 1) + selector confidence - tune --spec-draft-n-max there.
 #
 # HOW TO USE:
 #   1. In your fork: .github/workflows/fastmtp-windows-build.yml  (replace)
-#   2. Actions tab -> run the workflow. All three jobs can run in parallel
-#      (each has its own artifact).
+#   2. Actions tab -> run the workflow. Both jobs run in parallel.
 #   3. Download each artifact into its own folder, e.g.
-#        C:\Users\elmas\Downloads\llama-fastmtp-win-cuda\     (FastMTP)
-#        C:\Users\elmas\Downloads\llama-master-dflash2\       (DFlash2)
-#        C:\Users\elmas\Downloads\llama-beellama\             (BeeLlama)
+#        C:\Users\elmas\Downloads\llama-fastmtp-win-cuda\           (FastMTP)
+#        C:\Users\elmas\Downloads\llama-beellama-dflash2-win-cuda\  (unified)
 #      llm-studio `engines` auto-scans and one-click switches between them.
+#      The unified engine reports dflash/kvarn/kv-tail/spec-dm caps YES, so
+#      llm-studio v9.5 emits --kv-tail-type / --spec-dm-* for it only.
 #
 # CPU NOTE: GGML_NATIVE/AVX2 stay OFF on purpose - the host CPU is pre-AVX2
 # and v1 crashed on it. The GPU does the work anyway.
@@ -40,14 +54,14 @@ on:
         description: "CMAKE_CUDA_ARCHITECTURES (75=Turing, 86=Ampere, 89=Ada, 120a=Blackwell)"
         type: string
         default: "75"
-      llamacpp_ref:
-        description: "llama.cpp ref for the dflash2 job (>= b10658 / master)"
-        type: string
-        default: "master"
       beellama_ref:
-        description: "beellama.cpp ref"
+        description: "beellama.cpp ref (unified DFlash2 + KVarN + kv-tail + adaptive draft-max)"
         type: string
         default: "main"
+      fa_all_quants:
+        description: "GGML_CUDA_FA_ALL_QUANTS (ON = all 169 standard + 36 KVarN FA pairs, slower build)"
+        type: string
+        default: "OFF"
 
 jobs:
   # ==================================================================
@@ -123,79 +137,12 @@ jobs:
           retention-days: 30
 
   # ==================================================================
-  # Job 2 - upstream llama.cpp master (DFlash2 + n-gram speculators)
+  # Job 2 - UNIFIED BeeLlama (DFlash2 + KVarN + kv-tail + adaptive draft-max)
   # ==================================================================
-  dflash2-master:
+  beellama-dflash2:
     runs-on: windows-2022
     steps:
-      - name: Checkout ggml-org/llama.cpp master
-        uses: actions/checkout@v4
-        with:
-          repository: ggml-org/llama.cpp
-          ref: ${{ inputs.llamacpp_ref }}
-
-      - name: Install CUDA Toolkit (full default install)
-        uses: Jimver/cuda-toolkit@v0.2.21
-        with:
-          cuda: ${{ inputs.cuda }}
-          method: network
-
-      - name: Register CUDA toolset with MSVC (fallback copy)
-        shell: pwsh
-        run: |
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-          $dst = Join-Path $vs "MSBuild\Microsoft\VC\v170\BuildCustomizations"
-          $src = "$env:CUDA_PATH\extras\visual_studio_integration\MSBuildExtensions"
-          if (Test-Path $src) {
-            New-Item -ItemType Directory -Force $dst | Out-Null
-            Copy-Item "$src\*" $dst -Force
-            Write-Host "CUDA MSBuild props copied to $dst"
-          } else {
-            Write-Host "MSBuildExtensions not at $src - integration likely registered already"
-          }
-
-      - name: Configure (baseline CPU codegen - safe on pre-AVX2 CPUs)
-        run: >
-          cmake -S . -B build
-          -DGGML_CUDA=ON
-          -DCMAKE_CUDA_ARCHITECTURES=${{ inputs.cuda_arch }}
-          -DGGML_NATIVE=OFF
-          -DGGML_AVX=OFF
-          -DGGML_AVX2=OFF
-          -DGGML_FMA=OFF
-          -DGGML_F16C=OFF
-          -DGGML_BMI2=OFF
-          -DGGML_SSE42=OFF
-          -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build
-        run: cmake --build build --config Release -j 4
-
-      - name: Collect exes + all DLLs
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item build\bin\Release\*.exe dist\
-          Copy-Item build\bin\Release\*.dll dist\
-          Get-ChildItem "$env:CUDA_PATH\bin\cudart64_*.dll"  | Copy-Item -Destination dist\
-          Get-ChildItem "$env:CUDA_PATH\bin\cublas64_*.dll"  | Copy-Item -Destination dist\
-          Get-ChildItem "$env:CUDA_PATH\bin\cublasLt64_*.dll" | Copy-Item -Destination dist\
-          Get-ChildItem dist | Format-Table Name,Length
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: llama-master-dflash2-win-cuda
-          path: dist/
-          retention-days: 30
-
-  # ==================================================================
-  # Job 3 - BeeLlama (KVarN KV, kv-tail, adaptive draft-max)
-  # ==================================================================
-  beellama:
-    runs-on: windows-2022
-    steps:
-      - name: Checkout Anbeeld/beellama.cpp
+      - name: Checkout Anbeeld/beellama.cpp (upstream llama.cpp + DFlash2 + Bee extras)
         uses: actions/checkout@v4
         with:
           repository: Anbeeld/beellama.cpp
@@ -221,11 +168,13 @@ jobs:
             Write-Host "MSBuildExtensions not at $src - integration likely registered already"
           }
 
-      - name: Configure (BeeLlama - CUDA + FlashAttention incl. KVarN kernels)
+      - name: Configure (BeeLlama - CUDA FlashAttention incl. KVarN kernels)
         run: >
           cmake -S . -B build
           -DGGML_CUDA=ON
           -DGGML_CUDA_FA=ON
+          -DGGML_CUDA_FA_ALL_QUANTS=${{ inputs.fa_all_quants }}
+          -DGGML_CUDA_KVARN=ON
           -DCMAKE_CUDA_ARCHITECTURES=${{ inputs.cuda_arch }}
           -DGGML_NATIVE=OFF
           -DGGML_AVX=OFF
@@ -250,9 +199,18 @@ jobs:
           Get-ChildItem "$env:CUDA_PATH\bin\cublasLt64_*.dll" | Copy-Item -Destination dist\
           Get-ChildItem dist | Format-Table Name,Length
 
+      - name: Smoke-test capability surface (llm-studio caps)
+        shell: pwsh
+        run: |
+          $h = & .\dist\llama-server.exe --help 2>&1 | Out-String
+          foreach ($needle in @('draft-dflash','ngram-map-k4v','kvarn','kv-tail-tokens','kv-tail-type','spec-dm-controller')) {
+            if ($h -notmatch [regex]::Escape($needle)) { Write-Host "MISSING: $needle"; exit 1 }
+            Write-Host "OK: $needle"
+          }
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: beellama-win-cuda
+          name: llama-beellama-dflash2-win-cuda
           path: dist/
           retention-days: 30
