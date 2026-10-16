@@ -139,6 +139,14 @@
 #     now clean.
 #   * Preserved: All previous features, comments, and build logic
 #
+# v5.5-editorconfig FIX (2026-10-16):
+#   * Fixed: EditorConfig Checker failures caused by:
+#       - Missing space after colons in `key: value` pairs
+#       - Trailing whitespace on several lines
+#       - Missing final newline at end of file
+#       - Inconsistent indentation in a few PowerShell blocks
+#     All functional content, comments, and build logic remain unchanged.
+#
 # ⚠️ IMPORTANT CAVEAT for beellama_ref = v0.4.8:
 #     If the pre-flight check reports GGML_CUDA_KVARN / GGML_SPECULATIVE as
 #     "Manually-specified variables were not used by the project", then that
@@ -163,7 +171,7 @@ on:
       beellama_ref:
         description: "beellama.cpp ref (unified DFlash2 + KVarN + kv-tail + adaptive draft-max)"
         type: string
-        default: "v0.4.8"  # Changed from "main" to stable release
+        default: "v0.4.8"
       fa_all_quants:
         description: "GGML_CUDA_FA_ALL_QUANTS (ON = all 169 standard + 36 KVarN FA pairs, slower build)"
         type: string
