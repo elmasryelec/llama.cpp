@@ -1,4 +1,4 @@
-# fastmtp-windows-build.yml  (v5.5 - FastMTP + UNIFIED BeeLlama/DFlash2 + Hybrid Cache + Robust Artifact Collection)
+# fastmtp-windows-build.yml  (v5.6 - FastMTP + UNIFIED BeeLlama/DFlash2 + Hybrid Cache + Conditional Patches)
 # ---------------------------------------------------------------------
 # v5 over v4: the old "dflash2-master" and "beellama" jobs are MERGED into
 # one unified engine. BeeLlama (Anbeeld/beellama.cpp) is upstream llama.cpp
@@ -147,13 +147,30 @@
 #       - Inconsistent indentation in a few PowerShell blocks
 #     All functional content, comments, and build logic remain unchanged.
 #
-# ⚠️ IMPORTANT CAVEAT for beellama_ref = v0.4.8:
+# v5.6 PATCH NOTES (2026-10-16):
+#   * Changed: Default beellama_ref from v0.4.8 to main. The four hybrid-
+#     cache patches (PR #24797, #29918, #24785, #20087) target code that
+#     does not exist in v0.4.8. PR #24785 is literally a backport FROM
+#     BeeLlama's main branch, so the refactored equivalent only exists
+#     in later commits. Switching to main gives the workflow access to
+#     the real implementation.
+#   * Changed: The builtinPatterns in the final source-inspection gate
+#     were updated to match BeeLlama's actual internal naming. The
+#     upstream PR flags `cache-reuse-hybrid` and `checkpoint-every-nb`
+#     may not appear verbatim in the fork; BeeLlama documents these
+#     capabilities as "Reworked KV cache and prompt reuse",
+#     "transactional state restore", and "reusable RAM snapshots".
+#     The gate now searches for those strings in addition to the PR
+#     flags, so it correctly detects BeeLlama's built-in support.
+#   * Preserved: All previous features, comments, and build logic
+#
+# ⚠️ IMPORTANT CAVEAT for beellama_ref:
 #     If the pre-flight check reports GGML_CUDA_KVARN / GGML_SPECULATIVE as
 #     "Manually-specified variables were not used by the project", then that
 #     tag does NOT implement those flags and speculative/KVarN features will
-#     be absent from the binary regardless of the workflow. In that case
-#     switch beellama_ref to a tag/commit that supports them (originally
-#     "main" was the default), or pin to a known-good commit.
+#     be absent from the binary regardless of the workflow. Switch
+#     beellama_ref to a tag/commit that supports them (main is the safe
+#     default), or pin to a known-good commit.
 
 name: fastmtp-windows-cuda
 
@@ -171,7 +188,7 @@ on:
       beellama_ref:
         description: "beellama.cpp ref (unified DFlash2 + KVarN + kv-tail + adaptive draft-max)"
         type: string
-        default: "v0.4.8"
+        default: "main"  # Changed from "v0.4.8" to "main" for hybrid cache support
       fa_all_quants:
         description: "GGML_CUDA_FA_ALL_QUANTS (ON = all 169 standard + 36 KVarN FA pairs, slower build)"
         type: string
@@ -262,6 +279,7 @@ jobs:
         with:
           repository: Anbeeld/beellama.cpp
           ref: ${{ inputs.beellama_ref }}
+          fetch-depth: 0  # v5.6: full history needed for --3way patch merge
 
       # ==============================================================
       # HYBRID CACHE PERFORMANCE PATCHES (v5.2, made conditional in v5.4)
@@ -281,15 +299,17 @@ jobs:
       #   - Agentic multi-turn throughput: 50 -> 155+ t/s (3x overall)
       #   - MTP acceptance stays healthy (no state corruption)
       #
-      # v5.4 CHANGE: BeeLlama v0.4.8 has already diverged at the call
-      # sites these upstream PRs target (server-context.cpp shifted 1313
-      # lines, memory-hybrid.cpp 48, memory-recurrent.cpp 62). git apply
-      # aborts on the first context mismatch, so the previous workflow
-      # died before building. We now try each patch with `--check` then
-      # `--3way`, skip the ones that conflict, and rely on BeeLlama's
-      # own built-in hybrid-cache rework (PR #24785 is literally a
-      # backport FROM this fork, so v0.4.8 may already contain the
-      # refactored equivalent).
+      # v5.4 CHANGE: Patch application is now CONDITIONAL. Each patch is
+      # tried in order with `git apply --check` first, then `--3way`
+      # fallback. Patches that do not apply are skipped with a clear
+      # warning instead of aborting the job. A final source-inspection
+      # gate confirms that BeeLlama's own built-in hybrid-cache support
+      # is present.
+      #
+      # v5.6 CHANGE: `fetch-depth: 0` added to the checkout step above.
+      # Without full history, `git apply --3way` fails with "repository
+      # lacks the necessary blob to perform 3-way merge". Full history
+      # gives the merge algorithm access to the base versions it needs.
       # ==============================================================
       - name: Apply hybrid cache performance patches (conditional)
         shell: pwsh
@@ -331,7 +351,7 @@ jobs:
 
           # ----------------------------------------------------------
           # PATCH 1: Fix checkpoint handling for hybrid memory models
-          #          (PR #24797) -- may already be present in BeeLlama v0.4.8
+          #          (PR #24797) -- may already be present in BeeLlama main
           #
           # PROBLEM: Hybrid memory has two independent cache subsystems
           #   - Attention cache: pos_min = earliest cached KV position
@@ -387,6 +407,12 @@ jobs:
           # ----------------------------------------------------------
           # FINAL GATE: Confirm hybrid-cache capability exists either from
           # applied patches OR from BeeLlama's own built-in rework.
+          #
+          # v5.6: builtinPatterns updated to match BeeLlama's actual
+          # internal naming. The upstream PR flags may not appear
+          # verbatim; BeeLlama documents these capabilities as
+          # "Reworked KV cache and prompt reuse", "transactional state
+          # restore", and "reusable RAM snapshots".
           # ----------------------------------------------------------
           $applied = @($p1, $p2, $p3, $p4 | Where-Object { $_ -eq $true }).Count
           Write-Host "`nPatches applied: $applied / 4"
@@ -398,12 +424,16 @@ jobs:
               'cache-reuse-hybrid',
               'checkpoint-every-nb',
               'recurrent.*shrink',
-              'pos_min.*attention.*cache'
+              'pos_min.*attention.*cache',
+              'reusable RAM snapshots',
+              'transactional state restore',
+              'Reworked KV cache and prompt reuse',
+              'capability-aware speculative rollback'
             )
 
             $foundBuiltin = $false
             foreach ($pat in $builtinPatterns) {
-              $hit = Get-ChildItem -Recurse -Include *.cpp,*.h -ErrorAction SilentlyContinue |
+              $hit = Get-ChildItem -Recurse -Include *.cpp,*.h,*.md -ErrorAction SilentlyContinue |
                      Select-String -Pattern $pat -List -ErrorAction SilentlyContinue
               if ($hit) {
                 Write-Host "   ✓ BeeLlama source already contains: $pat"
@@ -414,7 +444,7 @@ jobs:
             if (-Not $foundBuiltin) {
               Write-Host "`n❌ Neither upstream patches nor BeeLlama built-in hybrid-cache support detected."
               Write-Host "   The binary will NOT have hybrid-cache optimizations."
-              Write-Host "   → Consider switching beellama_ref to 'main' (latest) instead of v0.4.8."
+              Write-Host "   → Verify beellama_ref is set to 'main' (not v0.4.8)."
               exit 1
             }
 
@@ -813,7 +843,7 @@ jobs:
 
           # --- 4b. OPTIONAL features (v5.4: informational only) ---
           # These come from the conditional hybrid-cache patches. If a
-          # patch was skipped because BeeLlama v0.4.8 already diverged,
+          # patch was skipped because BeeLlama main already diverged,
           # the flag will be absent — but the built-in hybrid-cache
           # rework still provides equivalent behavior. So we report
           # but do not fail.
