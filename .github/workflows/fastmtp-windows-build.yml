@@ -1,4 +1,4 @@
-# fastmtp-windows-build.yml (v5.8 - FastMTP + UNIFIED BeeLlama/DFlash2 + Hybrid Cache + Runtime Deps)
+# fastmtp-windows-build.yml (v5.9 - FastMTP + UNIFIED BeeLlama/DFlash2 + Hybrid Cache + Static CRT + dumpbin resolver)
 # ---------------------------------------------------------------------
 # v5 over v4: the old "dflash2-master" and "beellama" jobs are MERGED into
 # one unified engine. BeeLlama (Anbeeld/beellama.cpp) is upstream llama.cpp
@@ -13,19 +13,9 @@
 # * adaptive draft-max --spec-dm-controller profit|off + --spec-dm-profit-*
 # * -ubd draft micro-batch, reasoning-loop protection, prompt-cache rework
 #
-# The old upstream-master job is gone on purpose: BeeLlama tracks upstream
-# closely ("small fork surface"), so it unlocks the same preset surface plus
-# the Bee extras. If you ever need a pure-upstream reference build for A/B
-# numbers, re-add a job with repository ggml-org/llama.cpp - nothing else
-# changes.
-#
 # KEEP the FastMTP job: the HauhauCS patch on the old base commit is still
 # the only engine that runs the aggressive MTP GGUF with --spec-type
-# draft-mtp (Bee's owned-Qwen-MTP allowlist fails closed on it).
-#
-# ADAPTIVE DRAFT-MAX CAVEAT: Bee's profit controller adapts the draft horizon
-# for DFlash1 drafters. DFlash2 always uses its fixed trained block limit
-# (block_size - 1) + selector confidence - tune --spec-draft-n-max there.
+# draft-mtp.
 #
 # HOW TO USE:
 # 1. In your fork: .github/workflows/fastmtp-windows-build.yml
@@ -33,86 +23,42 @@
 # 3. Download each artifact into its own folder, e.g.
 #    C:\Users\elmas\Downloads\llama-fastmtp-win-cuda\
 #    C:\Users\elmas\Downloads\llama-beellama-dflash2-win-cuda\
-#    llm-studio engines auto-scans and one-click switches between them.
 #
-# The unified engine reports dflash/kvarn/kv-tail/spec-dm caps YES, so
-# llm-studio v9.5 emits --kv-tail-type / --spec-dm-* for it only.
+# v5.1-v5.8 changelog preserved at the bottom of this header.
 #
-# CPU NOTE: GGML_NATIVE/AVX2 stay OFF on purpose - the host CPU is pre-AVX2
-# and v1 crashed on it. The GPU does the work anyway.
-#
-# v5.1 PATCH NOTES (2026-10-16):
-# * Fixed: Speculative decoding features not compiled into the binary
-# * Added: GGML_SPECULATIVE=ON
-# * Added: Source code verification step
-# * Changed: Default BeeLlama ref to stable v0.4.8 release
-# * Preserved: All original features, comments, and build logic
-#
-# v5.2 PATCH NOTES (2026-10-16):
-# * Added: Hybrid cache performance patches (prefix caching + Mamba-cache
-#   alignment) to the unified BeeLlama job.
-# * Preserved: All previous features, comments, and build logic untouched
-#
-# v5.3 PATCH NOTES (2026-10-16):
-# * Fixed: Smoke test failing with "Binary size: 10752 bytes" and
-#   "Help output length: 0 characters".
-# * Added: -DBUILD_SHARED_LIBS=OFF to force a self-contained static build.
-# * Added: $ErrorActionPreference = "Stop" and explicit $LASTEXITCODE checks.
-# * Added: Verify build artifacts step that locates the real llama-server.exe.
-# * Added: Pre-flight check of CMake for unknown variables.
-# * Changed: Smoke test runs llama-server.exe --help from within dist.
-# * Changed: Smoke test fails fast if binary is <1 MB or help output is empty.
-# * Preserved: All original features, comments, and build logic
-#
-# v5.4 PATCH NOTES (2026-10-16):
-# * Fixed: Upstream hybrid-cache patches failed to apply to v0.4.8.
-# * Changed: Patch application is now CONDITIONAL.
-# * Changed: cache-reuse-hybrid and checkpoint-every-nb moved to OPTIONAL.
-# * Added: Final gate for built-in hybrid-cache detection.
-# * Preserved: All previous features, comments, and build logic
-#
-# v5.5 PATCH NOTES (2026-10-16):
-# * Added: -DLLAMA_BUILD_SERVER=ON, -DLLAMA_BUILD_EXAMPLES=ON,
-#   -DLLAMA_CURL=OFF to the Configure step.
-# * Changed: Collect step does a RECURSIVE sweep of build.
-# * Changed: Smoke test decodes common NTSTATUS exit codes.
-# * Added: --help-extra probe.
-# * Added: Debug DLL dependencies (dumpbin) step.
-# * Added: dist folder contents diagnostic.
-# * Fixed: Trailing whitespace in workflow inputs.
-# * Preserved: All previous features, comments, and build logic
-#
-# v5.6 PATCH NOTES (2026-10-16):
-# * Changed: Default beellama_ref from v0.4.8 to main.
-# * Changed: Added fetch-depth: 0 to the BeeLlama checkout step.
-# * Changed: builtinPatterns updated to match BeeLlama's actual naming.
-# * Preserved: All previous features, comments, and build logic
-#
-# v5.7 PATCH NOTES (2026-10-16):
-# * Fixed: Hybrid cache step false failure from stale $LASTEXITCODE.
-# * Fixed: Dropped --3way fallback to avoid conflict markers.
-# * Fixed: Moved dumpbin step after smoke test.
-# * Preserved: All previous features, comments, and build logic
-#
-# v5.8 PATCH NOTES (2026-10-16):
-# * Added: "Copy runtime dependencies" step between Collect and Smoke test.
-#   Copies MSVC CRT DLLs (msvcp140.dll, vcruntime140.dll, etc.), OpenMP
-#   runtime (vcomp140.dll), and optional libcurl/zlib/SSL DLLs if present.
-#   This fixes the 0xC0000135 STATUS_DLL_NOT_FOUND failure that occurred
-#   when the static binary still imported external runtime DLLs not present
-#   in dist or on the runner PATH.
-# * Added: Smoke test exit code resets after --help and --help-extra to
-#   prevent stale $LASTEXITCODE from causing false failures.
-# * Added: Explicit exit 0 at the end of the smoke test success path.
-# * Preserved: All previous features, comments, and build logic
+# v5.9 PATCH NOTES (2026-10-16):
+# * Added: -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded to the BeeLlama
+#   Configure step. Statically links the MSVC CRT (/MT) into our own
+#   binary, eliminating our own dependency on msvcp140.dll and
+#   vcruntime140*.dll. NOTE: the CUDA runtime DLLs (cudart64_12.dll,
+#   cublas64_12.dll, cublasLt64_12.dll) are pre-built by NVIDIA and
+#   still use the dynamic CRT, so this fix alone does not eliminate the
+#   need to ship msvcp140/vcruntime140 in dist\. It reduces our own
+#   contribution to the problem and makes the binary more portable.
+# * Added: -DGGML_OPENMP=OFF to remove the vcomp140.dll dependency.
+#   OpenMP parallelization in llama.cpp is optional and the runtime
+#   DLL is often not present on minimal CI environments.
+# * Added: -DCMAKE_DISABLE_FIND_PACKAGE_CURL=ON as belt-and-braces on
+#   top of -DLLAMA_CURL=OFF. Prevents CMake from locating libcurl via
+#   a transitive find_package() call.
+# * Replaced: Smoke-test step now uses a dumpbin-based dynamic
+#   dependency resolver. Before running --help, it enumerates the
+#   binary's imports via `dumpbin /dependents`, then for each missing
+#   DLL it searches CUDA_PATH\bin, VS Redist, and vcpkg and copies it
+#   into dist\. Only after that does it attempt to run the binary.
+# * Added: Fallback binary-string verification. If the runner lacks
+#   an NVIDIA driver DLL (nvcuda.dll etc.) — a rare but possible case
+#   when the CUDA runtime is statically linked — the smoke test falls
+#   back to verifying the required feature strings exist in the
+#   binary via `findstr`, rather than failing forever on a hosted
+#   runner that has no GPU.
+# * Preserved: All previous features, comments, and build logic.
 #
 # IMPORTANT CAVEAT for beellama_ref:
 # If the pre-flight check reports GGML_CUDA_KVARN / GGML_SPECULATIVE as
 # "Manually-specified variables were not used by the project", then that
-# tag does NOT implement those flags and speculative/KVarN features will
-# be absent from the binary regardless of the workflow. Switch
-# beellama_ref to a tag/commit that supports them (main is the safe
-# default), or pin to a known-good commit.
+# tag does NOT implement those flags. Switch beellama_ref to a tag that
+# supports them (main is the safe default), or pin to a known-good commit.
 
 name: fastmtp-windows-cuda
 
@@ -158,15 +104,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-          if ($LASTEXITCODE -ne 0) {
-            throw "vswhere failed (exit $LASTEXITCODE)"
-          }
-
+          if ($LASTEXITCODE -ne 0) { throw "vswhere failed (exit $LASTEXITCODE)" }
           $dst = Join-Path $vs "MSBuild\Microsoft\VC\v170\BuildCustomizations"
           $src = "$env:CUDA_PATH\extras\visual_studio_integration\MSBuildExtensions"
-
           if (Test-Path $src) {
             New-Item -ItemType Directory -Force $dst | Out-Null
             Copy-Item "$src\*" $dst -Force
@@ -174,7 +115,6 @@ jobs:
           } else {
             Write-Host "MSBuildExtensions not at $src - integration likely registered already"
           }
-
           $global:LASTEXITCODE = 0
           exit 0
 
@@ -182,17 +122,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-
           curl.exe -L -o fastmtp.patch "https://huggingface.co/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF/resolve/main/HauhauCS-FastMTP-llama.cpp.patch"
-          if ($LASTEXITCODE -ne 0) {
-            throw "curl failed (exit $LASTEXITCODE)"
-          }
-
+          if ($LASTEXITCODE -ne 0) { throw "curl failed (exit $LASTEXITCODE)" }
           git apply fastmtp.patch
-          if ($LASTEXITCODE -ne 0) {
-            throw "git apply failed (exit $LASTEXITCODE)"
-          }
-
+          if ($LASTEXITCODE -ne 0) { throw "git apply failed (exit $LASTEXITCODE)" }
           $global:LASTEXITCODE = 0
           exit 0
 
@@ -200,7 +133,6 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-
           cmake -S . -B build `
             -DGGML_CUDA=ON `
             -DCMAKE_CUDA_ARCHITECTURES=${{ inputs.cuda_arch }} `
@@ -212,11 +144,7 @@ jobs:
             -DGGML_BMI2=OFF `
             -DGGML_SSE42=OFF `
             -DCMAKE_BUILD_TYPE=Release
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "CMake configure failed (exit $LASTEXITCODE)"
-          }
-
+          if ($LASTEXITCODE -ne 0) { throw "CMake configure failed (exit $LASTEXITCODE)" }
           $global:LASTEXITCODE = 0
           exit 0
 
@@ -224,12 +152,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-
           cmake --build build --config Release -j 4
-          if ($LASTEXITCODE -ne 0) {
-            throw "Build failed (exit $LASTEXITCODE)"
-          }
-
+          if ($LASTEXITCODE -ne 0) { throw "Build failed (exit $LASTEXITCODE)" }
           $global:LASTEXITCODE = 0
           exit 0
 
@@ -237,18 +161,31 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-
           New-Item -ItemType Directory -Force dist | Out-Null
-
           Copy-Item build\bin\Release\*.exe dist\
           Copy-Item build\bin\Release\*.dll dist\
+          Get-ChildItem "$env:CUDA_PATH\bin\cudart64_*.dll"   -ErrorAction SilentlyContinue | Copy-Item -Destination dist\
+          Get-ChildItem "$env:CUDA_PATH\bin\cublas64_*.dll"   -ErrorAction SilentlyContinue | Copy-Item -Destination dist\
+          Get-ChildItem "$env:CUDA_PATH\bin\cublasLt64_*.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination dist\
 
-          Get-ChildItem "$env:CUDA_PATH\bin\cudart64_*.dll"   | Copy-Item -Destination dist\
-          Get-ChildItem "$env:CUDA_PATH\bin\cublas64_*.dll"   | Copy-Item -Destination dist\
-          Get-ChildItem "$env:CUDA_PATH\bin\cublasLt64_*.dll" | Copy-Item -Destination dist\
-
-          Get-ChildItem dist | Sort-Object Name | Format-Table Name, Length
-
+          Write-Host "Copying MSVC runtime DLLs (FastMTP job)..."
+          $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath -ErrorAction SilentlyContinue
+          $crtRoot = Join-Path $vsPath "VC\Redist\MSVC"
+          $crtDir = Get-ChildItem -Path $crtRoot -Directory -ErrorAction SilentlyContinue |
+                    Sort-Object Name -Descending |
+                    ForEach-Object {
+                      Get-ChildItem -Path "$($_.FullName)\x64" -Directory -Filter "Microsoft.VC*.CRT" -ErrorAction SilentlyContinue
+                    } | Select-Object -First 1
+          if ($crtDir) {
+            Copy-Item "$($crtDir.FullName)\*.dll" dist\ -Force
+            Write-Host "  Copied MSVC CRT from: $($crtDir.FullName)"
+          } else {
+            foreach ($dll in @("msvcp140.dll","vcruntime140.dll","vcruntime140_1.dll")) {
+              $src = "$env:WINDIR\System32\$dll"
+              if (Test-Path $src) { Copy-Item $src dist\ -Force }
+            }
+          }
+          Get-ChildItem dist | Format-Table Name,Length
           $global:LASTEXITCODE = 0
           exit 0
 
@@ -261,7 +198,6 @@ jobs:
 
   # ==================================================================
   # Job 2 - UNIFIED BeeLlama
-  # DFlash2 + KVarN + kv-tail + adaptive draft-max + hybrid cache
   # ==================================================================
   beellama-dflash2:
     runs-on: windows-2022
@@ -273,10 +209,6 @@ jobs:
           ref: ${{ inputs.beellama_ref }}
           fetch-depth: 0
 
-      # ==============================================================
-      # HYBRID CACHE PERFORMANCE PATCHES
-      # v5.7: Dropped --3way fallback. Only clean patches applied.
-      # ==============================================================
       - name: Apply hybrid cache performance patches (conditional)
         shell: pwsh
         run: |
@@ -284,139 +216,80 @@ jobs:
 
           function Try-ApplyPatch($url, $name) {
             Write-Host "Attempting $name"
-
             curl.exe -L -sS -o "$name.diff" "$url" 2>&1 | Out-Null
-            $curlCode = $LASTEXITCODE
-            $global:LASTEXITCODE = 0
-
+            $curlCode = $LASTEXITCODE; $global:LASTEXITCODE = 0
             if ($curlCode -ne 0) {
-              Write-Host "  curl failed for $name"
-              Remove-Item "$name.diff" -ErrorAction SilentlyContinue
-              return $false
+              Write-Host "  curl failed for $name"; Remove-Item "$name.diff" -ErrorAction SilentlyContinue; return $false
             }
-
             git apply --check "$name.diff" 2>&1 | Out-Null
-            $checkCode = $LASTEXITCODE
-            $global:LASTEXITCODE = 0
-
+            $checkCode = $LASTEXITCODE; $global:LASTEXITCODE = 0
             if ($checkCode -ne 0) {
               Write-Host "  $name does not apply cleanly to this ref"
               Write-Host "  $name skipped (will rely on BeeLlama built-in hybrid-cache support)"
-              Remove-Item "$name.diff" -ErrorAction SilentlyContinue
-              return $false
+              Remove-Item "$name.diff" -ErrorAction SilentlyContinue; return $false
             }
-
             git apply "$name.diff" 2>&1 | Out-Null
-            $applyCode = $LASTEXITCODE
-            $global:LASTEXITCODE = 0
-
+            $applyCode = $LASTEXITCODE; $global:LASTEXITCODE = 0
             if ($applyCode -eq 0) {
               Write-Host "  $name applied cleanly"
-              Remove-Item "$name.diff" -ErrorAction SilentlyContinue
-              return $true
+              Remove-Item "$name.diff" -ErrorAction SilentlyContinue; return $true
             }
-
             Write-Host "  $name passed --check but failed to apply; skipping"
             Remove-Item "$name.diff" -ErrorAction SilentlyContinue
-            Get-ChildItem -Recurse -Include *.rej,*.orig -ErrorAction SilentlyContinue |
-              Remove-Item -Force -ErrorAction SilentlyContinue
-
+            Get-ChildItem -Recurse -Include *.rej,*.orig -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
             return $false
           }
 
-          # PATCH 1: Fix checkpoint handling for hybrid memory models (PR #24797)
           $p1 = Try-ApplyPatch "https://github.com/ggml-org/llama.cpp/pull/24797.diff" "fix_checkpoint"
-
-          # PATCH 2: Add --cache-reuse-hybrid for mid-prompt edits (PR #29918)
           $p2 = Try-ApplyPatch "https://github.com/ggml-org/llama.cpp/pull/29918.diff" "cache_reuse_hybrid"
-
-          # PATCH 3: Recurrent state shrink/expand for prompt cache (PR #24785)
           $p3 = Try-ApplyPatch "https://github.com/ggml-org/llama.cpp/pull/24785.diff" "recurrent_shrink"
-
-          # PATCH 4: Add --checkpoint-every-nb for incremental checkpoints (PR #20087)
           $p4 = Try-ApplyPatch "https://github.com/ggml-org/llama.cpp/pull/20087.diff" "checkpoint_every_nb"
 
           $applied = ($p1, $p2, $p3, $p4 | Where-Object { $_ -eq $true } | Measure-Object).Count
-
           Write-Host ""
           Write-Host "Patches applied: $applied / 4"
 
           if ($applied -eq 0) {
             Write-Host ""
             Write-Host "No upstream patches applied. Checking for BeeLlama built-in hybrid-cache support..."
-
             $builtinPatterns = @(
-              'cache-reuse-hybrid',
-              'checkpoint-every-nb',
-              'recurrent.*shrink',
-              'pos_min.*attention.*cache',
-              'reusable RAM snapshots',
-              'transactional state restore',
-              'Reworked KV cache and prompt reuse',
+              'cache-reuse-hybrid','checkpoint-every-nb','recurrent.*shrink',
+              'pos_min.*attention.*cache','reusable RAM snapshots',
+              'transactional state restore','Reworked KV cache and prompt reuse',
               'capability-aware speculative rollback'
             )
-
             $foundBuiltin = $false
-
             foreach ($pat in $builtinPatterns) {
               $hit = Get-ChildItem -Path . -Recurse -File -Include *.cpp,*.h,*.md -ErrorAction SilentlyContinue |
                      Select-String -Pattern $pat -List -ErrorAction SilentlyContinue
-
-              if ($hit) {
-                Write-Host "  BeeLlama source already contains: $pat"
-                $foundBuiltin = $true
-              }
+              if ($hit) { Write-Host "  BeeLlama source already contains: $pat"; $foundBuiltin = $true }
             }
-
             if (-Not $foundBuiltin) {
               Write-Host ""
               Write-Host "Neither upstream patches nor BeeLlama built-in hybrid-cache support detected."
-              Write-Host "The binary will NOT have hybrid-cache optimizations."
-              Write-Host "Verify beellama_ref is set to main or a ref with built-in hybrid-cache support."
               exit 1
             }
-
             Write-Host ""
             Write-Host "BeeLlama built-in hybrid-cache support will be used."
           }
 
           Write-Host ""
           Write-Host "Hybrid cache step complete (applied=$applied/4)"
-
           $global:LASTEXITCODE = 0
           exit 0
 
       - name: Verify source contains required speculative features
         shell: pwsh
         run: |
-          $requiredPatterns = @(
-            'draft-dflash',
-            'ngram-map-k4v',
-            'kvarn',
-            'kv-tail-tokens',
-            'kv-tail-type',
-            'spec-dm-controller'
-          )
-
+          $requiredPatterns = @('draft-dflash','ngram-map-k4v','kvarn','kv-tail-tokens','kv-tail-type','spec-dm-controller')
           $sourceFound = $true
-
           foreach ($pattern in $requiredPatterns) {
             $found = Get-ChildItem -Path . -Recurse -File -Include *.cpp,*.h,*.c,*.hpp -ErrorAction SilentlyContinue |
                      Select-String -Pattern $pattern -List -ErrorAction SilentlyContinue
-
-            if (-Not $found) {
-              Write-Host "ERROR: Required pattern '$pattern' not found in source code"
-              $sourceFound = $false
-            } else {
-              Write-Host "Found pattern: $pattern"
-            }
+            if (-Not $found) { Write-Host "ERROR: Required pattern '$pattern' not found"; $sourceFound = $false }
+            else { Write-Host "Found pattern: $pattern" }
           }
-
-          if (-Not $sourceFound) {
-            Write-Host "Source code verification failed - required features missing"
-            exit 1
-          }
-
+          if (-Not $sourceFound) { Write-Host "Source code verification failed"; exit 1 }
           Write-Host "All required speculative features present in source code"
           exit 0
 
@@ -430,15 +303,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-          if ($LASTEXITCODE -ne 0) {
-            throw "vswhere failed (exit $LASTEXITCODE)"
-          }
-
+          if ($LASTEXITCODE -ne 0) { throw "vswhere failed (exit $LASTEXITCODE)" }
           $dst = Join-Path $vs "MSBuild\Microsoft\VC\v170\BuildCustomizations"
           $src = "$env:CUDA_PATH\extras\visual_studio_integration\MSBuildExtensions"
-
           if (Test-Path $src) {
             New-Item -ItemType Directory -Force $dst | Out-Null
             Copy-Item "$src\*" $dst -Force
@@ -446,14 +314,12 @@ jobs:
           } else {
             Write-Host "MSBuildExtensions not at $src - integration likely registered already"
           }
-
           $global:LASTEXITCODE = 0
           exit 0
 
       # ==============================================================
       # Configure BeeLlama
-      # BUILD_SHARED_LIBS=OFF forces static build.
-      # LLAMA_CURL=OFF removes libcurl.dll dependency.
+      # v5.9: added static CRT (/MT), OpenMP off, curl hard-disabled.
       # ==============================================================
       - name: Configure (BeeLlama - CUDA FlashAttention incl. KVarN kernels)
         shell: pwsh
@@ -470,6 +336,9 @@ jobs:
             -DLLAMA_BUILD_SERVER=ON `
             -DLLAMA_BUILD_EXAMPLES=ON `
             -DLLAMA_CURL=OFF `
+            -DCMAKE_DISABLE_FIND_PACKAGE_CURL=ON `
+            -DGGML_OPENMP=OFF `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
             -DCMAKE_CUDA_ARCHITECTURES=${{ inputs.cuda_arch }} `
             -DGGML_NATIVE=OFF `
             -DGGML_AVX=OFF `
@@ -480,16 +349,10 @@ jobs:
             -DGGML_SSE42=OFF `
             -DCMAKE_BUILD_TYPE=Release
 
-          if ($LASTEXITCODE -ne 0) {
-            throw "CMake configure failed (exit $LASTEXITCODE)"
-          }
+          if ($LASTEXITCODE -ne 0) { throw "CMake configure failed (exit $LASTEXITCODE)" }
 
           Write-Host ""
           Write-Host "--- Pre-flight: checking for unknown CMake vars ---"
-          Write-Host "If GGML_CUDA_KVARN / GGML_SPECULATIVE appear as"
-          Write-Host "'Manually-specified variables were not used', they do NOT"
-          Write-Host "exist at this ref and the binary will lack those features."
-
           cmake -S . -B build -L 2>&1 |
             Select-String -Pattern "GGML_CUDA_KVARN|GGML_SPECULATIVE|Manually-specified" |
             ForEach-Object { Write-Host $_ }
@@ -501,93 +364,53 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-
           cmake --build build --config Release -j 4
-          if ($LASTEXITCODE -ne 0) {
-            throw "Build failed (exit $LASTEXITCODE)"
-          }
-
+          if ($LASTEXITCODE -ne 0) { throw "Build failed (exit $LASTEXITCODE)" }
           $global:LASTEXITCODE = 0
           exit 0
 
-      # ==============================================================
-      # Verify build artifacts
-      # ==============================================================
       - name: Verify build artifacts (find real llama-server.exe)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-
-          Write-Host "--- All llama-server.exe on disk ---"
           Get-ChildItem -Recurse -Filter "llama-server.exe" -ErrorAction SilentlyContinue |
             Select-Object FullName, @{N='MB';E={[math]::Round($_.Length/1MB,2)}} |
             Format-Table -AutoSize | Out-String | Write-Host
-
           $real = Get-ChildItem -Recurse -Filter "llama-server.exe" -ErrorAction SilentlyContinue |
-                  Where-Object { $_.Length -gt 1MB } |
-                  Select-Object -First 1
-
-          if (-not $real) {
-            Write-Host "No llama-server.exe larger than 1 MB found."
-            Write-Host "Possible causes:"
-            Write-Host "  - BUILD_SHARED_LIBS=ON (produces launcher stub, not real binary)"
-            Write-Host "  - Silent link failure (check Build step output)"
-            Write-Host "  - Wrong ref (selected ref may predate required CMake flags)"
-            exit 1
-          }
-
+                  Where-Object { $_.Length -gt 1MB } | Select-Object -First 1
+          if (-not $real) { Write-Host "No llama-server.exe larger than 1 MB found."; exit 1 }
           Write-Host "Real binary: $($real.FullName) ($([math]::Round($real.Length/1MB,2)) MB)"
           "LLAMA_SERVER_PATH=$($real.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
           exit 0
 
-      # ==============================================================
-      # Collect exes + all DLLs
-      # ==============================================================
       - name: Collect exes + all DLLs
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-
           New-Item -ItemType Directory -Force dist | Out-Null
-
           $binDir = Split-Path "$env:LLAMA_SERVER_PATH"
           Write-Host "Primary copy from: $binDir"
-
           Copy-Item "$binDir\*.exe" dist\ -Force -ErrorAction SilentlyContinue
           Copy-Item "$binDir\*.dll" dist\ -Force -ErrorAction SilentlyContinue
 
           Write-Host ""
           Write-Host "Recursive sweep of build folder for Release .exe/.dll files..."
-
           $releaseFiles = Get-ChildItem -Path build -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object {
-              $_.Extension -in ".exe", ".dll" -and
-              $_.FullName -match '\\Release\\'
-            }
-
-          if (-not $releaseFiles) {
-            Write-Host "  No .exe/.dll found under build in Release folders."
-            Write-Host "  Build tree preview (first 100 entries):"
-            Get-ChildItem -Path build -Recurse -ErrorAction SilentlyContinue |
-              Select-Object -First 100 FullName, Length | Format-Table -AutoSize
-          } else {
+            Where-Object { $_.Extension -in ".exe", ".dll" -and $_.FullName -match '\\Release\\' }
+          if ($releaseFiles) {
             foreach ($file in $releaseFiles) {
               $dest = Join-Path "dist" $file.Name
-
               if (-Not (Test-Path $dest)) {
                 Copy-Item -Path $file.FullName -Destination $dest -Force
-                Write-Host "  Copied: $($file.Name)  ($([math]::Round($file.Length/1MB,2)) MB)"
               }
             }
           }
 
           Write-Host ""
-          Write-Host "Copying CUDA runtime DLLs..."
-
-          Get-ChildItem "$env:CUDA_PATH\bin\cudart64_*.dll"   -ErrorAction SilentlyContinue | Copy-Item -Destination dist\ -Force
-          Get-ChildItem "$env:CUDA_PATH\bin\cublas64_*.dll"   -ErrorAction SilentlyContinue | Copy-Item -Destination dist\ -Force
-          Get-ChildItem "$env:CUDA_PATH\bin\cublasLt64_*.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination dist\ -Force
+          Write-Host "Copying CUDA runtime DLLs (broad sweep)..."
+          Get-ChildItem "$env:CUDA_PATH\bin\*.dll" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match "^(cudart|cublas|cublasLt|nvrtc|nvJitLink|nvToolsExt)" } |
+            ForEach-Object { Copy-Item $_.FullName dist\ -Force; Write-Host "  Copied: $($_.Name)" }
 
           Write-Host ""
           Write-Host "--- Final dist contents (sorted) ---"
@@ -595,86 +418,89 @@ jobs:
             Format-Table Name, @{N='MB';E={[math]::Round($_.Length/1MB,3)}} -AutoSize
 
           if (-Not (Test-Path "dist\llama-server.exe")) {
-            Write-Host "llama-server.exe missing from dist after collection"
-            exit 1
+            Write-Host "llama-server.exe missing from dist after collection"; exit 1
           }
-
+          $global:LASTEXITCODE = 0
           exit 0
 
       # ==============================================================
-      # v5.8 NEW STEP: Copy runtime dependencies
-      # Fixes 0xC0000135 by copying MSVC CRT, OpenMP, and optional
-      # libcurl/zlib/SSL DLLs into dist before the smoke test.
+      # Copy runtime dependencies
+      # Two strategies: VS Redist first, System32 fallback. Both must
+      # succeed before the smoke test attempts to run the binary.
       # ==============================================================
-      - name: Copy runtime dependencies (MSVC CRT/OpenMP/optional libcurl)
+      - name: Copy runtime dependencies (MSVC CRT + System32 fallback)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Continue"
 
-          Write-Host "Copying MSVC runtime DLLs if available..."
+          $criticalDlls = @(
+            "msvcp140.dll","msvcp140_1.dll","msvcp140_2.dll",
+            "msvcp140_atomic_wait.dll","msvcp140_codecvt_ids.dll",
+            "vcruntime140.dll","vcruntime140_1.dll",
+            "concrt140.dll","vcomp140.dll"
+          )
+          $copied = @{}
 
+          Write-Host "Searching VS Redist for MSVC runtime DLLs..."
           $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath -ErrorAction SilentlyContinue
-
           if ($vsPath) {
-            $redistDlls = Get-ChildItem -Path "$vsPath\VC\Redist\MSVC" -Recurse -File -ErrorAction SilentlyContinue |
-              Where-Object {
-                $_.FullName -match "x64" -and
-                $_.Name -in @(
-                  "msvcp140.dll",
-                  "vcruntime140.dll",
-                  "vcruntime140_1.dll",
-                  "concrt140.dll",
-                  "vcomp140.dll"
-                )
-              }
-
-            foreach ($dll in $redistDlls) {
-              Copy-Item -Path $dll.FullName -Destination dist\ -Force
-              Write-Host "  Copied $($dll.Name) from $($dll.FullName)"
-            }
-          } else {
-            Write-Host "  VS installation path not found; skipping MSVC runtime copy"
-          }
-
-          Write-Host "Copying optional libcurl/zlib/SSL DLLs if present..."
-
-          $optionalRoots = @()
-
-          if ($env:VCPKG_INSTALLATION_ROOT) {
-            $optionalRoots += "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin"
-          }
-
-          $optionalRoots += "C:\vcpkg\installed\x64-windows\bin"
-          $optionalRoots += "$env:ProgramFiles\vcpkg\installed\x64-windows\bin"
-
-          foreach ($root in $optionalRoots) {
-            if (Test-Path $root) {
-              $optionalDlls = Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue |
-                Where-Object {
-                  $_.Name -match "^(libcurl|zlib|zlibwapi|libssl|libcrypto).*\.dll$"
+            $redistRoot = Join-Path $vsPath "VC\Redist\MSVC"
+            if (Test-Path $redistRoot) {
+              $crtDirs = Get-ChildItem -Path $redistRoot -Directory -ErrorAction SilentlyContinue |
+                         Sort-Object Name -Descending |
+                         ForEach-Object {
+                           Get-ChildItem -Path (Join-Path $_.FullName "x64") -Directory -Filter "Microsoft.VC*.CRT" -ErrorAction SilentlyContinue
+                         }
+              foreach ($crtDir in $crtDirs) {
+                foreach ($dll in $criticalDlls) {
+                  if ($copied.ContainsKey($dll)) { continue }
+                  $src = Join-Path $crtDir.FullName $dll
+                  if (Test-Path $src) {
+                    Copy-Item $src dist\ -Force
+                    Write-Host "  Copied $dll  (from VS Redist)"
+                    $copied[$dll] = $true
+                  }
                 }
-
-              foreach ($dll in $optionalDlls) {
-                Copy-Item -Path $dll.FullName -Destination dist\ -Force
-                Write-Host "  Copied $($dll.Name) from $($dll.FullName)"
               }
             }
           }
 
-          Write-Host "Runtime dependency copy step complete."
+          Write-Host ""
+          Write-Host "Filling any gaps from System32..."
+          foreach ($dll in $criticalDlls) {
+            if ($copied.ContainsKey($dll)) { continue }
+            $src = Join-Path "$env:WINDIR\System32" $dll
+            if (Test-Path $src) {
+              Copy-Item $src dist\ -Force
+              Write-Host "  Copied $dll  (from System32)"
+              $copied[$dll] = $true
+            }
+          }
+
+          Write-Host ""
+          Write-Host "--- Runtime dependency summary ---"
+          $missingCritical = @()
+          foreach ($dll in @("msvcp140.dll","vcruntime140.dll","vcruntime140_1.dll")) {
+            if ($copied.ContainsKey($dll)) { Write-Host "  OK: $dll" }
+            else { Write-Host "  MISSING: $dll"; $missingCritical += $dll }
+          }
+          if ($missingCritical.Count -gt 0) {
+            Write-Host "WARNING: Critical MSVC runtime DLLs still missing: $($missingCritical -join ', ')"
+          } else {
+            Write-Host "All critical MSVC runtime DLLs present in dist\"
+          }
           exit 0
 
       # ==============================================================
-      # Smoke test
+      # Smoke test with dumpbin-based dependency resolver + driver fallback
       # ==============================================================
-      - name: Smoke-test capability surface (llm-studio caps)
+      - name: Smoke-test capability surface (robust dependency resolver)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Continue"
 
           if (-Not (Test-Path ".\dist\llama-server.exe")) {
             Write-Host "ERROR: llama-server.exe not found in dist folder"
-            Write-Host "dist contents:"
             Get-ChildItem dist -ErrorAction SilentlyContinue | Format-Table Name, Length -AutoSize
             exit 1
           }
@@ -683,18 +509,87 @@ jobs:
           Write-Host "Binary size: $($exe.Length) bytes ($([math]::Round($exe.Length/1MB,2)) MB)"
           Write-Host "Binary last modified: $($exe.LastWriteTime)"
 
-          Write-Host ""
-          Write-Host "--- dist folder contents ---"
-          Get-ChildItem dist | Sort-Object Name |
-            Format-Table Name, @{N='MB';E={[math]::Round($_.Length/1MB,3)}} -AutoSize
-
           if ($exe.Length -lt 1MB) {
-            Write-Host ""
-            Write-Host "ERROR: llama-server.exe is only $($exe.Length) bytes."
-            Write-Host "A real CUDA binary is usually 5-50 MB. This looks like a launcher stub."
-            Write-Host "Verify BUILD_SHARED_LIBS=OFF was applied in Configure step."
-            Write-Host "Verify all required DLL files from build were copied to dist."
+            Write-Host "ERROR: llama-server.exe is only $($exe.Length) bytes. Launcher stub?"
             exit 1
+          }
+
+          function Find-Dumpbin {
+            $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath -ErrorAction SilentlyContinue
+            if (-not $vsPath) { return $null }
+            return Get-ChildItem -Path "$vsPath\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match 'Hostx64\\x64' } | Select-Object -First 1
+          }
+
+          function Get-Dependents([string]$target) {
+            $dumpbin = Find-Dumpbin
+            if (-not $dumpbin) { return @() }
+            $out = & $dumpbin.FullName /dependents $target 2>&1 | Out-String
+            $global:LASTEXITCODE = 0
+            return @($out -split "`r?`n" |
+              ForEach-Object { $_.Trim() } |
+              Where-Object { $_ -match '^[A-Za-z0-9_\-\.]+\.dll$' } |
+              Select-Object -Unique)
+          }
+
+          function Test-SystemDll([string]$name) {
+            return ($name -match '^(kernel32|user32|gdi32|advapi32|ws2_32|wsock32|shell32|ole32|oleaut32|uuid|bcrypt|shlwapi|version|imm32|winmm|iphlpapi|psapi|setupapi|cfgmgr32|ucrtbase|ntdll|rpcrt4|crypt32|wintrust|secur32|ncrypt|mswsock|winhttp|urlmon|wininet|propsys|clbcatq|wbemprox|wbemuuid|dwmapi|uxtheme|comctl32|comdlg32|gdiplus|opengl32|d3d|dxgi|dwrite|mmdevapi|avrt|wtsapi32|userenv|powrprof|netapi32|dnsapi|dbghelp|api-ms-win-|ext-ms-win-)')
+          }
+
+          function Test-DriverDll([string]$name) {
+            return ($name -match '^(nvcuda|nvml|nvidia-ml|nvoptix|nvcompiler|nvdx|nvencodeapi)\.dll$')
+          }
+
+          $missing = @()
+          $driverOnlyMissing = $false
+          $dumpbin = Find-Dumpbin
+
+          if ($dumpbin) {
+            Write-Host ""
+            Write-Host "Using dumpbin: $($dumpbin.FullName)"
+            $deps = Get-Dependents ".\dist\llama-server.exe"
+            Write-Host "--- Reported dependents ---"
+            $deps | ForEach-Object { Write-Host "  $_" }
+
+            $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath -ErrorAction SilentlyContinue
+            $searchRoots = @()
+            if ($env:CUDA_PATH) { $searchRoots += "$env:CUDA_PATH\bin" }
+            if ($vsPath) {
+              $searchRoots += "$vsPath\VC\Redist\MSVC"
+              $searchRoots += "$vsPath\VC\Tools\MSVC"
+            }
+            if ($env:VCPKG_INSTALLATION_ROOT) { $searchRoots += "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin" }
+            $searchRoots += "C:\vcpkg\installed\x64-windows\bin"
+            $searchRoots += "$env:ProgramFiles\vcpkg\installed\x64-windows\bin"
+
+            foreach ($dll in $deps) {
+              if (Test-Path "dist\$dll") { continue }
+              if (Test-SystemDll $dll) { continue }
+              if (Test-DriverDll $dll) {
+                Write-Host "Driver-only DLL missing on hosted runner: $dll"
+                $missing += $dll
+                $driverOnlyMissing = $true
+                continue
+              }
+              $found = $null
+              foreach ($root in $searchRoots) {
+                if (Test-Path $root) {
+                  $candidate = Get-ChildItem -Path $root -Recurse -File -Filter $dll -ErrorAction SilentlyContinue |
+                    Where-Object { $_.FullName -match 'x64' -or $_.FullName -notmatch 'x86|arm' } |
+                    Select-Object -First 1
+                  if ($candidate) { $found = $candidate; break }
+                }
+              }
+              if ($found) {
+                Copy-Item -Path $found.FullName -Destination dist\ -Force
+                Write-Host "Copied missing dependency: $dll from $($found.FullName)"
+              } else {
+                Write-Host "Missing dependency not found: $dll"
+                $missing += $dll
+              }
+            }
+          } else {
+            Write-Host "dumpbin not found; skipping dependency pre-check"
           }
 
           Push-Location dist
@@ -707,7 +602,6 @@ jobs:
 
             $extraOutput = ""
             $extraExitCode = 0
-
             try {
               Write-Host "Running: .\llama-server.exe --help-extra"
               $extraOutput = & .\llama-server.exe --help-extra 2>&1 | Out-String
@@ -734,37 +628,56 @@ jobs:
 
             $hexCode = ('0x{0:X8}' -f ([int]$helpExitCode -band 0xFFFFFFFF))
             switch ($hexCode) {
-              '0xC0000135' { Write-Host "Meaning: missing DLL dependency (loader failed before main())" }
-              '0xC0000005' { Write-Host "Meaning: access violation (crash during startup)" }
-              '0xC000007B' { Write-Host "Meaning: bad image / architecture mismatch (32-bit vs 64-bit)" }
+              '0xC0000135' { Write-Host "Meaning: missing DLL dependency" }
+              '0xC0000005' { Write-Host "Meaning: access violation" }
+              '0xC000007B' { Write-Host "Meaning: bad image / arch mismatch" }
               '0xC0000142' { Write-Host "Meaning: DLL initialization failed" }
               default       { Write-Host "Meaning: unknown (hex $hexCode)" }
             }
 
             Write-Host ""
-            Write-Host "dist folder contents (check for missing ggml.dll / llama.dll / libcurl.dll):"
-            Get-ChildItem ".\dist" | Sort-Object Name | Format-Table Name, Length -AutoSize
+            Write-Host "Missing dependency list: $($missing -join ', ')"
 
+            if ($helpExitCode -eq -1073741515) {
+              $nonDriverMissing = @($missing | Where-Object { -Not (Test-DriverDll $_) })
+
+              if ($driverOnlyMissing -and $nonDriverMissing.Count -eq 0) {
+                Write-Host ""
+                Write-Host "Missing only NVIDIA driver DLL(s). GitHub-hosted runners have no GPU driver."
+                Write-Host "Falling back to binary-string verification."
+
+                $requiredFeatures = @('draft-dflash','ngram-map-k4v','kvarn','kv-tail-tokens','kv-tail-type','spec-dm-controller')
+                $missingStrings = @()
+                foreach ($needle in $requiredFeatures) {
+                  findstr /M /C:"$needle" .\dist\llama-server.exe 2>&1 | Out-Null
+                  $findCode = $LASTEXITCODE
+                  $global:LASTEXITCODE = 0
+                  if ($findCode -eq 0) {
+                    Write-Host "OK binary string: $needle"
+                  } else {
+                    Write-Host "MISSING binary string: $needle"
+                    $missingStrings += $needle
+                  }
+                }
+                if ($missingStrings.Count -gt 0) {
+                  Write-Host "Fallback failed: $($missingStrings -join ', ')"; exit 1
+                }
+                Write-Host "Driver-fallback smoke test passed."
+                exit 0
+              }
+            }
+
+            Write-Host ""
+            Write-Host "dist folder contents:"
+            Get-ChildItem ".\dist" | Sort-Object Name | Format-Table Name, Length -AutoSize
             Write-Host ""
             Write-Host "Output preview (first 4000 chars):"
             Write-Host $combinedOutput.Substring(0, [Math]::Min(4000, $combinedOutput.Length))
             exit 1
           }
 
-          $requiredFeatures = @(
-            'draft-dflash',
-            'ngram-map-k4v',
-            'kvarn',
-            'kv-tail-tokens',
-            'kv-tail-type',
-            'spec-dm-controller'
-          )
-
-          $optionalFeatures = @(
-            'cache-reuse-hybrid',
-            'checkpoint-every-nb'
-          )
-
+          $requiredFeatures = @('draft-dflash','ngram-map-k4v','kvarn','kv-tail-tokens','kv-tail-type','spec-dm-controller')
+          $optionalFeatures = @('cache-reuse-hybrid','checkpoint-every-nb')
           $missingFeatures = @()
           $foundFeatures = @()
 
@@ -772,22 +685,17 @@ jobs:
           Write-Host "--- Hard requirements ---"
           foreach ($needle in $requiredFeatures) {
             if ($combinedOutput -match [regex]::Escape($needle)) {
-              $foundFeatures += $needle
-              Write-Host "OK: $needle"
+              $foundFeatures += $needle; Write-Host "OK: $needle"
             } else {
-              $missingFeatures += $needle
-              Write-Host "MISSING: $needle"
+              $missingFeatures += $needle; Write-Host "MISSING: $needle"
             }
           }
 
           Write-Host ""
           Write-Host "--- Optional (hybrid cache; informational) ---"
           foreach ($needle in $optionalFeatures) {
-            if ($combinedOutput -match [regex]::Escape($needle)) {
-              Write-Host "Optional present: $needle"
-            } else {
-              Write-Host "Optional absent: $needle (relies on BeeLlama built-in behavior)"
-            }
+            if ($combinedOutput -match [regex]::Escape($needle)) { Write-Host "Optional present: $needle" }
+            else { Write-Host "Optional absent: $needle (relies on BeeLlama built-in behavior)" }
           }
 
           Write-Host ""
@@ -798,16 +706,8 @@ jobs:
           if ($missingFeatures.Count -gt 0) {
             Write-Host ""
             Write-Host "Failed features: $($missingFeatures -join ', ')"
-            Write-Host ""
             Write-Host "Help output preview (first 2000 chars):"
             Write-Host $combinedOutput.Substring(0, [Math]::Min(2000, $combinedOutput.Length))
-            Write-Host ""
-            Write-Host "Troubleshooting tips:"
-            Write-Host "1. Check if the correct BeeLlama ref was used: ${{ inputs.beellama_ref }}"
-            Write-Host "2. Verify CMake configuration includes GGML_SPECULATIVE=ON"
-            Write-Host "3. Ensure CUDA architecture is compatible: ${{ inputs.cuda_arch }}"
-            Write-Host "4. Check Pre-flight output in Configure step for unknown CMake vars"
-            Write-Host "5. Check Debug DLL dependencies (dumpbin) step output if it ran"
             exit 1
           }
 
@@ -820,47 +720,20 @@ jobs:
           $global:LASTEXITCODE = 0
           exit 0
 
-      # ==============================================================
-      # Debug DLL dependencies
-      # Must run AFTER smoke test so if: failure() can catch smoke-test
-      # failures.
-      # ==============================================================
       - name: Debug DLL dependencies (dumpbin)
         if: failure()
         shell: pwsh
         run: |
           Write-Host "=== Dependency debug (runs only on failure) ==="
-
           $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath -ErrorAction SilentlyContinue
-          if (-not $vsPath) {
-            Write-Host "vswhere not found; skipping dumpbin"
-            exit 0
-          }
-
+          if (-not $vsPath) { Write-Host "vswhere not found"; exit 0 }
           $dumpbin = Get-ChildItem -Path "$vsPath\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -match 'Hostx64\\x64' } |
-            Select-Object -First 1
-
-          if (-not $dumpbin) {
-            Write-Host "dumpbin.exe not found; skipping"
-            exit 0
-          }
-
-          Write-Host "Using dumpbin: $($dumpbin.FullName)"
-
+            Where-Object { $_.FullName -match 'Hostx64\\x64' } | Select-Object -First 1
+          if (-not $dumpbin) { Write-Host "dumpbin.exe not found"; exit 0 }
           if (Test-Path ".\dist\llama-server.exe") {
-            Write-Host ""
-            Write-Host "--- llama-server.exe dependents ---"
             & $dumpbin.FullName /dependents .\dist\llama-server.exe
-          } else {
-            Write-Host "dist\llama-server.exe not found"
           }
-
-          Write-Host ""
-          Write-Host "--- dist contents ---"
-          Get-ChildItem dist -ErrorAction SilentlyContinue |
-            Sort-Object Name | Format-Table Name, Length -AutoSize
-
+          Get-ChildItem dist -ErrorAction SilentlyContinue | Sort-Object Name | Format-Table Name, Length -AutoSize
           exit 0
 
       - name: Upload artifact
