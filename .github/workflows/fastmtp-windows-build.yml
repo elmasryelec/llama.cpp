@@ -40,6 +40,14 @@
 #
 # CPU NOTE: GGML_NATIVE/AVX2 stay OFF on purpose - the host CPU is pre-AVX2
 # and v1 crashed on it. The GPU does the work anyway.
+#
+# v5.1 PATCH NOTES (2026-10-16):
+#   * Fixed: Speculative decoding features (draft-dflash, ngram-map-k4v, etc.)
+#     not being compiled into the binary due to missing CMake flags
+#   * Added: GGML_SPECULATIVE=ON to ensure speculative decoding support
+#   * Added: Source code verification step to check for required features
+#   * Changed: Default BeeLlama ref to stable v0.4.8 release for reliability
+#   * Preserved: All original features, comments, and build logic
 
 name: fastmtp-windows-cuda
 
@@ -57,7 +65,7 @@ on:
       beellama_ref:
         description: "beellama.cpp ref (unified DFlash2 + KVarN + kv-tail + adaptive draft-max)"
         type: string
-        default: "main"
+        default: "v0.4.8"  # Changed from "main" to stable release
       fa_all_quants:
         description: "GGML_CUDA_FA_ALL_QUANTS (ON = all 169 standard + 36 KVarN FA pairs, slower build)"
         type: string
@@ -148,6 +156,38 @@ jobs:
           repository: Anbeeld/beellama.cpp
           ref: ${{ inputs.beellama_ref }}
 
+      - name: Verify source contains required speculative features
+        shell: pwsh
+        run: |
+          # Check for key speculative decoding patterns in source code
+          $requiredPatterns = @(
+            'draft-dflash',
+            'ngram-map-k4v',
+            'kvarn',
+            'kv-tail-tokens',
+            'kv-tail-type',
+            'spec-dm-controller'
+          )
+          
+          $sourceFound = $true
+          foreach ($pattern in $requiredPatterns) {
+            $found = Get-ChildItem -Recurse -Include *.cpp,*.h,*.c,*.hpp -ErrorAction SilentlyContinue | 
+                     Select-String -Pattern $pattern -List -ErrorAction SilentlyContinue
+            if (-Not $found) {
+              Write-Host "ERROR: Required pattern '$pattern' not found in source code"
+              $sourceFound = $false
+            } else {
+              Write-Host "✓ Found pattern: $pattern"
+            }
+          }
+          
+          if (-Not $sourceFound) {
+            Write-Host "❌ Source code verification failed - required features missing"
+            exit 1
+          }
+          
+          Write-Host "✓ All required speculative features present in source code"
+
       - name: Install CUDA Toolkit (full default install)
         uses: Jimver/cuda-toolkit@v0.2.21
         with:
@@ -175,6 +215,7 @@ jobs:
           -DGGML_CUDA_FA=ON
           -DGGML_CUDA_FA_ALL_QUANTS=${{ inputs.fa_all_quants }}
           -DGGML_CUDA_KVARN=ON
+          -DGGML_SPECULATIVE=ON
           -DCMAKE_CUDA_ARCHITECTURES=${{ inputs.cuda_arch }}
           -DGGML_NATIVE=OFF
           -DGGML_AVX=OFF
@@ -202,10 +243,68 @@ jobs:
       - name: Smoke-test capability surface (llm-studio caps)
         shell: pwsh
         run: |
-          $h = & .\dist\llama-server.exe --help 2>&1 | Out-String
-          foreach ($needle in @('draft-dflash','ngram-map-k4v','kvarn','kv-tail-tokens','kv-tail-type','spec-dm-controller')) {
-            if ($h -notmatch [regex]::Escape($needle)) { Write-Host "MISSING: $needle"; exit 1 }
-            Write-Host "OK: $needle"
+          # First verify the binary exists and is executable
+          if (-Not (Test-Path ".\dist\llama-server.exe")) {
+            Write-Host "ERROR: llama-server.exe not found in dist folder"
+            exit 1
+          }
+          
+          $binaryInfo = Get-Item ".\dist\llama-server.exe"
+          Write-Host "Binary size: $($binaryInfo.Length) bytes"
+          Write-Host "Binary last modified: $($binaryInfo.LastWriteTime)"
+          
+          # Run help and capture output with error handling
+          try {
+            $h = & .\dist\llama-server.exe --help 2>&1 | Out-String
+            Write-Host "Help command executed successfully"
+            Write-Host "Help output length: $($h.Length) characters"
+          } catch {
+            Write-Host "ERROR: Failed to execute llama-server.exe --help"
+            Write-Host "Error details: $_"
+            exit 1
+          }
+          
+          # Check for required features with detailed reporting
+          $requiredFeatures = @(
+            'draft-dflash',
+            'ngram-map-k4v', 
+            'kvarn',
+            'kv-tail-tokens',
+            'kv-tail-type',
+            'spec-dm-controller'
+          )
+          
+          $missingFeatures = @()
+          $foundFeatures = @()
+          
+          foreach ($needle in $requiredFeatures) {
+            if ($h -match [regex]::Escape($needle)) {
+              $foundFeatures += $needle
+              Write-Host "✓ OK: $needle"
+            } else {
+              $missingFeatures += $needle
+              Write-Host "❌ MISSING: $needle"
+            }
+          }
+          
+          # Report summary
+          Write-Host "`n=== Feature Verification Summary ==="
+          Write-Host "Found features: $($foundFeatures.Count) / $($requiredFeatures.Count)"
+          Write-Host "Missing features: $($missingFeatures.Count)"
+          
+          if ($missingFeatures.Count -gt 0) {
+            Write-Host "`n❌ Failed features: $($missingFeatures -join ', ')"
+            Write-Host "`nHelp output preview (first 1000 chars):"
+            Write-Host $h.Substring(0, [Math]::Min(1000, $h.Length))
+            Write-Host "`nTroubleshooting tips:"
+            Write-Host "1. Check if the correct BeeLlama ref was used: ${{ inputs.beellama_ref }}"
+            Write-Host "2. Verify CMake configuration includes GGML_SPECULATIVE=ON"
+            Write-Host "3. Ensure CUDA architecture is compatible: ${{ inputs.cuda_arch }}"
+            exit 1
+          } else {
+            Write-Host "`n✅ All required features are present in the binary"
+            Write-Host "`n=== Binary Help Output (first 500 chars) ==="
+            Write-Host $h.Substring(0, [Math]::Min(500, $h.Length))
           }
 
       - name: Upload artifact
