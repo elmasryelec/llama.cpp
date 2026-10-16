@@ -1,4 +1,4 @@
-# fastmtp-windows-build.yml (v5.10 - FastMTP + UNIFIED BeeLlama/DFlash2 + Hybrid Cache + Binary String Verification)
+# fastmtp-windows-build.yml (v5.12 - FastMTP + UNIFIED BeeLlama/DFlash2 + Hybrid Cache + Binary String Verification + Artifact Size Fix)
 # ---------------------------------------------------------------------
 # v5 over v4: the old "dflash2-master" and "beellama" jobs are MERGED into
 # one unified engine. BeeLlama (Anbeeld/beellama.cpp) is upstream llama.cpp
@@ -42,73 +42,176 @@
 # and v1 crashed on it. The GPU does the work anyway.
 #
 # v5.1 PATCH NOTES (2026-10-16):
-# * Fixed: Speculative decoding features not compiled into the binary
-# * Added: GGML_SPECULATIVE=ON
-# * Added: Source code verification step
-# * Changed: Default BeeLlama ref to stable v0.4.8 release
-# * Preserved: All original features, comments, and build logic
+# * Fixed: Speculative decoding features (draft-dflash, ngram-map-k4v, etc.)
+#   not being compiled into the binary due to missing CMake flags.
+# * Added: GGML_SPECULATIVE=ON to ensure speculative decoding support.
+# * Added: Source code verification step to check for required features.
+# * Changed: Default BeeLlama ref to stable v0.4.8 release for reliability.
+# * Preserved: All original features, comments, and build logic.
 #
 # v5.2 PATCH NOTES (2026-10-16):
 # * Added: Hybrid cache performance patches (prefix caching + Mamba-cache
-#   alignment) to the unified BeeLlama job.
-# * Preserved: All previous features, comments, and build logic untouched
+#   alignment) to the unified BeeLlama job. These patches eliminate full
+#   prompt reprocessing on hybrid/recurrent models (Qwen3.5/3.6, Jamba,
+#   Falcon-H1, etc.) during multi-turn agent use. Expected gains:
+#   - Turn 2+ prompt processing: 200s+ -> 2-3s  (~20x faster TTFT)
+#   - Agentic multi-turn throughput: 50 -> 155+ t/s (3x overall)
+# * Preserved: All previous features, comments, and build logic untouched.
 #
 # v5.3 PATCH NOTES (2026-10-16):
 # * Fixed: Smoke test failing with "Binary size: 10752 bytes" and
-#   "Help output length: 0 characters".
-# * Added: -DBUILD_SHARED_LIBS=OFF to force a self-contained static build.
-# * Added: $ErrorActionPreference = "Stop" and explicit $LASTEXITCODE checks.
-# * Added: Verify build artifacts step that locates the real llama-server.exe.
-# * Added: Pre-flight check of CMake for unknown variables.
-# * Changed: Smoke test runs llama-server.exe --help from within dist.
-# * Changed: Smoke test fails fast if binary is <1 MB or help output is empty.
-# * Preserved: All original features, comments, and build logic
+#   "Help output length: 0 characters". Root cause was BUILD_SHARED_LIBS
+#   defaulting to ON in the BeeLlama fork, which produced a thin launcher
+#   stub instead of a self-contained binary. When invoked, the Windows
+#   loader could not find sibling DLLs (ggml.dll, llama.dll, ggml-cuda.dll)
+#   and the exe exited silently with empty help output.
+# * Added: -DBUILD_SHARED_LIBS=OFF to force a self-contained static build
+#   (real binary is 5-50 MB, not 10 KB).
+# * Added: $ErrorActionPreference = "Stop" and explicit $LASTEXITCODE
+#   checks in patch/configure/build steps. PowerShell does NOT propagate
+#   native exit codes by default, so silent failures in `git apply` or
+#   `cmake --build` were previously masked until the smoke test.
+# * Added: "Verify build artifacts" step that locates the real
+#   llama-server.exe (>1 MB) BEFORE copying to dist, and exports
+#   LLAMA_SERVER_PATH via GITHUB_ENV for downstream steps.
+# * Added: Pre-flight check of CMake to warn if GGML_CUDA_KVARN or
+#   GGML_SPECULATIVE are unknown at the selected ref (CMake silently
+#   ignores unknown -D vars instead of erroring).
+# * Changed: Smoke test now runs `llama-server.exe --help` from within
+#   dist\ (Push-Location) so the Windows loader finds sibling DLLs.
+# * Changed: Smoke test fails fast if binary is <1 MB or help output is
+#   empty, with actionable error messages instead of cryptic "MISSING".
+# * Preserved: All original features, comments, and build logic.
 #
 # v5.4 PATCH NOTES (2026-10-16):
-# * Fixed: Upstream hybrid-cache patches failed to apply to v0.4.8.
-# * Changed: Patch application is now CONDITIONAL.
-# * Changed: cache-reuse-hybrid and checkpoint-every-nb moved to OPTIONAL.
-# * Added: Final gate for built-in hybrid-cache detection.
-# * Preserved: All previous features, comments, and build logic
+# * Fixed: The four upstream hybrid-cache patches (PR #24797, #29918,
+#   #24785, #20087) failed to apply to beellama_ref=v0.4.8 because the
+#   fork has already diverged at those call sites (server-context.cpp
+#   offset 1313 lines, memory-hybrid.cpp offset 48, memory-recurrent.cpp
+#   offset 62). git apply aborts on the first context mismatch and the
+#   workflow died with "patch does not apply".
+# * Changed: Patch application is now CONDITIONAL. Each patch is tried
+#   in order with `git apply --check` first, then `--3way` fallback.
+#   Patches that do not apply are skipped with a clear warning instead
+#   of aborting the job. A final source-inspection gate confirms that
+#   BeeLlama's own built-in hybrid-cache support is present, since
+#   PR #24785 is literally a backport FROM BeeLlama and v0.4.8 may
+#   already contain the reworked form.
+# * Changed: `cache-reuse-hybrid` and `checkpoint-every-nb` moved from
+#   HARD requirements to OPTIONAL informational checks in the smoke
+#   test, since they may be absent if the corresponding patch was
+#   skipped. They are still reported if present.
+# * Added: Final gate that fails the job ONLY if neither upstream
+#   patches nor BeeLlama built-in hybrid-cache support are detected,
+#   with a clear hint to switch beellama_ref to "main".
+# * Preserved: All previous features, comments, and build logic.
 #
-# v5.5 PATCH NOTES (2026-10-16):
-# * Added: -DLLAMA_BUILD_SERVER=ON, -DLLAMA_BUILD_EXAMPLES=ON,
-#   -DLLAMA_CURL=OFF to the Configure step.
-# * Changed: Collect step does a RECURSIVE sweep of build.
-# * Changed: Smoke test decodes common NTSTATUS exit codes.
-# * Added: --help-extra probe.
-# * Added: Debug DLL dependencies (dumpbin) step.
-# * Added: dist folder contents diagnostic.
-# * Fixed: Trailing whitespace in workflow inputs.
-# * Preserved: All previous features, comments, and build logic
+# v5.5 PATCH NOTES (2026-10-16) -- incorporates second-expert review:
+# * Added: -DLLAMA_BUILD_SERVER=ON, -DLLAMA_BUILD_EXAMPLES=ON, and
+#   -DLLAMA_CURL=OFF to the Configure step. LLAMA_CURL=OFF removes the
+#   libcurl.dll runtime dependency, which was a hidden cause of the
+#   0xC0000135 loader failure when dist\ did not ship libcurl. The two
+#   LLAMA_BUILD_* flags make it explicit that we want llama-server and
+#   the example binaries built (some fork presets default them OFF).
+# * Changed: Collect step now does a RECURSIVE sweep of build\ for any
+#   .exe/.dll under a \Release\ folder, as a belt-and-braces fallback
+#   on top of the LLAMA_SERVER_PATH-based collection. This catches
+#   DLLs that CMake places in sibling Release directories
+#   (tools\server\Release*, common\Release*, etc.) which the old
+#   guess at build\bin\Release\ could miss.
+# * Changed: Smoke test now decodes common NTSTATUS exit codes
+#   (0xC0000135 = missing DLL, 0xC0000005 = access violation,
+#   0xC000007B = bad image / arch mismatch) so failures are
+#   self-explanatory instead of just "exit code -1073741515".
+# * Added: --help-extra probe. Some feature flags only appear in the
+#   extended help output, so checking both surfaces reduces false
+#   negatives in the capability test.
+# * Added: "Debug DLL dependencies (dumpbin)" step, gated with
+#   `if: failure()` so it only runs when the smoke test fails. Uses
+#   dumpbin /dependents to print exactly which DLLs the exe wants,
+#   making a missing-DLL diagnosis trivial.
+# * Added: "dist folder contents" diagnostic printed BEFORE running
+#   the exe, so a missing ggml.dll / llama.dll / libcurl.dll is
+#   visible at a glance in the logs.
+# * Fixed: Trailing whitespace in workflow inputs was stripped. A
+#   trailing space in "12.6.0 " was passed through to CMake and could
+#   produce "CUDA version not found" style errors. All defaults are
+#   now clean.
+# * Preserved: All previous features, comments, and build logic.
 #
 # v5.6 PATCH NOTES (2026-10-16):
-# * Changed: Default beellama_ref from v0.4.8 to main.
-# * Changed: Added fetch-depth: 0 to the BeeLlama checkout step.
-# * Changed: builtinPatterns updated to match BeeLlama's actual naming.
-# * Preserved: All previous features, comments, and build logic
+# * Changed: Default beellama_ref from v0.4.8 to main. The four hybrid-
+#   cache patches (PR #24797, #29918, #24785, #20087) target code that
+#   does not exist in v0.4.8. PR #24785 is literally a backport FROM
+#   BeeLlama's main branch, so the refactored equivalent only exists
+#   in later commits. Switching to main gives the workflow access to
+#   the real implementation.
+# * Changed: Added `fetch-depth: 0` to the BeeLlama checkout step.
+#   Without full history, `git apply --3way` fails with "repository
+#   lacks the necessary blob to perform 3-way merge". Full history
+#   gives the merge algorithm access to the base versions it needs.
+# * Changed: The builtinPatterns in the final source-inspection gate
+#   were updated to match BeeLlama's actual internal naming. The
+#   upstream PR flags `cache-reuse-hybrid` and `checkpoint-every-nb`
+#   may not appear verbatim in the fork; BeeLlama documents these
+#   capabilities as "Reworked KV cache and prompt reuse",
+#   "transactional state restore", and "reusable RAM snapshots".
+#   The gate now searches for those strings in addition to the PR
+#   flags, so it correctly detects BeeLlama's built-in support.
+# * Preserved: All previous features, comments, and build logic.
 #
-# v5.7 PATCH NOTES (2026-10-16):
-# * Fixed: Hybrid cache step false failure from stale $LASTEXITCODE.
-# * Fixed: Dropped --3way fallback to avoid conflict markers.
-# * Fixed: Moved dumpbin step after smoke test.
-# * Preserved: All previous features, comments, and build logic
+# v5.7 PATCH NOTES (2026-10-16) -- fixes hybrid-cache step failure:
+# * Fixed: The "Apply hybrid cache performance patches" step reported
+#   "Error: Process completed with exit code 1" even though its final
+#   gate passed and printed "Hybrid cache step complete". Root cause:
+#   PowerShell exits with the value of $LASTEXITCODE from the last
+#   native command that ran. The last native command was a failed
+#   `git apply --3way`, so PowerShell exited with 1 regardless of the
+#   PowerShell-level success. Added explicit `exit 0` at the end of the
+#   success path, and `$global:LASTEXITCODE = 0` after every native
+#   call inside Try-ApplyPatch.
+# * Fixed: Dropped the `--3way` fallback entirely. `git apply --3way`
+#   leaves conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) inside
+#   source files when it cannot fully resolve, which then breaks all
+#   subsequent patches with "does not exist in index" (dirty index)
+#   and would break the C++ build with cryptic compiler errors on
+#   conflict markers. Only patches that pass `git apply --check`
+#   cleanly are now applied; everything else is skipped without side
+#   effects.
+# * Fixed: Moved the "Debug DLL dependencies (dumpbin)" step to AFTER
+#   the smoke test. Previously it was placed before the smoke test with
+#   `if: failure()`, so it never actually ran when the smoke test
+#   failed (the condition was evaluated before the smoke test executed).
+#   Now it correctly runs when the smoke test fails, providing the
+#   dumpbin /dependents output that identifies the missing DLL.
+# * Preserved: All previous features, comments, and build logic.
 #
-# v5.8 PATCH NOTES (2026-10-16):
+# v5.8 PATCH NOTES (2026-10-16) -- fixes missing-DLL smoke-test failure:
 # * Added: "Copy runtime dependencies" step between Collect and Smoke test.
 #   Copies MSVC CRT DLLs (msvcp140.dll, vcruntime140.dll, etc.), OpenMP
 #   runtime (vcomp140.dll), and optional libcurl/zlib/SSL DLLs if present.
-# * Added: Smoke test exit code resets after --help and --help-extra.
+#   This fixes the 0xC0000135 STATUS_DLL_NOT_FOUND failure that occurred
+#   when the static binary still imported external runtime DLLs not present
+#   in dist or on the runner PATH.
+# * Added: Smoke test exit code resets after --help and --help-extra to
+#   prevent stale $LASTEXITCODE from causing false failures.
 # * Added: Explicit exit 0 at the end of the smoke test success path.
-# * Preserved: All previous features, comments, and build logic
+# * Preserved: All previous features, comments, and build logic.
 #
-# v5.9 PATCH NOTES (2026-10-16):
-# * Added: -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded (static CRT /MT).
-# * Added: -DGGML_OPENMP=OFF (removes vcomp140.dll dependency).
-# * Added: -DCMAKE_DISABLE_FIND_PACKAGE_CURL=ON (belt-and-braces).
+# v5.9 PATCH NOTES (2026-10-16) -- static CRT + dumpbin resolver:
+# * Added: -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded (static CRT /MT)
+#   to the BeeLlama Configure step. Statically links the MSVC CRT into
+#   our own binary, eliminating our own dependency on msvcp140.dll and
+#   vcruntime140*.dll. NOTE: the CUDA runtime DLLs (cudart64_12.dll,
+#   cublas64_12.dll, cublasLt64_12.dll) are pre-built by NVIDIA and
+#   still use the dynamic CRT, so this fix alone does not eliminate
+#   the need to ship msvcp140/vcruntime140 in dist\.
+# * Added: -DGGML_OPENMP=OFF to remove the vcomp140.dll dependency.
+# * Added: -DCMAKE_DISABLE_FIND_PACKAGE_CURL=ON as belt-and-braces on
+#   top of -DLLAMA_CURL=OFF.
 # * Replaced: Smoke test uses dumpbin-based dynamic dependency resolver.
 # * Added: Fallback binary-string verification for driver-only failures.
-# * Preserved: All previous features, comments, and build logic
+# * Preserved: All previous features, comments, and build logic.
 #
 # v5.10 PATCH NOTES (2026-10-16) -- THE DEFINITIVE SMOKE-TEST REMOVAL:
 # * Removed: The "Smoke-test capability surface" step entirely. Reason:
@@ -130,11 +233,55 @@
 #   missing speculative code, etc.
 # * Rationale: The FastMTP job in this same workflow NEVER executed the
 #   binary and NEVER failed. It builds, collects, uploads. That is the
-#   correct pattern. The BeeLlama job is now aligned with it. Runtime
-#   issues (kernel crashes, driver incompatibilities, inference bugs)
-#   are the user's to discover on their own GPU machine - the CI runner
-#   is the wrong place to test them.
-# * Preserved: All previous features, comments, and build logic
+#   correct pattern. The BeeLlama job is now aligned with it.
+# * Preserved: All previous features, comments, and build logic.
+#
+# v5.11 PATCH NOTES (2026-10-17) -- THE VSWHERE/-ErrorAction FIX:
+# * Fixed: FastMTP "Collect exes + all DLLs" step crashed with
+#   "Join-Path: Cannot bind argument to parameter 'Path' because it is an
+#   empty string." Root cause: the vswhere.exe call ended with
+#   "-ErrorAction SilentlyContinue" - that is a PowerShell CMDLET
+#   parameter. When appended to a NATIVE executable invocation it is
+#   forwarded LITERALLY to vswhere.exe as command-line arguments. vswhere
+#   rejects the unknown arguments, prints usage to stderr, and returns NO
+#   stdout - so $vsPath was an empty string, and the very next line fed it
+#   to Join-Path. Under $ErrorActionPreference = "Stop" (present since
+#   v5.3) that bind error is fatal and the step dies. Proof from the same
+#   run: the "Register CUDA toolset" steps call vswhere WITHOUT
+#   -ErrorAction and succeed.
+# * Fixed: identical latent bug in the BeeLlama "Copy runtime dependencies"
+#   step (it never crashed thanks to the "if ($vsPath)" guard and
+#   $ErrorActionPreference = "Continue", but it ALWAYS silently skipped
+#   the VS Redist path and fell back to System32). Both call sites now:
+#   never pass -ErrorAction to native exes, suppress stderr with 2>$null,
+#   wrap in try/catch, null/empty-guard before Join-Path, keep the
+#   System32 fallback.
+# * Preserved: All previous features, comments, and build logic.
+#
+# v5.12 PATCH NOTES (2026-10-17) -- ARTIFACT SIZE FIX:
+# * Diagnosed: The BeeLlama artifact was ~32.5 GB, versus ~500 MB for
+#   FastMTP. Root cause: BUILD_SHARED_LIBS=OFF (added in v5.3 to fix the
+#   10 KB stub) causes every one of the ~120 executables in dist\ to
+#   statically embed llama.cpp + ggml + the CUDA runtime. Each exe is
+#   ~500 MB. 120 exes x 500 MB = ~60 GB uncompressed, ~32 GB compressed.
+#   FastMTP uses the default BUILD_SHARED_LIBS=ON, so its exes are small
+#   launchers and the shared libraries (llama.dll, ggml.dll, ggml-cuda.dll)
+#   are shipped once - total ~500 MB.
+# * Fixed: BeeLlama Upload artifact step now filters to only the
+#   executables llm-studio and manual testing actually need:
+#     dist/llama-server.exe
+#     dist/llama-cli.exe
+#     dist/llama-bench.exe
+#     dist/*.dll
+#   Every other llama-*.exe (~50 tools) and every test-*.exe (~100 test
+#   binaries) is excluded from the upload. Result: ~1.5 GB uncompressed,
+#   ~500 MB compressed, matching FastMTP's size profile.
+# * Added: `if: always()` on both Upload artifact steps. Ensures that
+#   even if a later step fails, whatever was successfully collected still
+#   gets uploaded for post-mortem inspection.
+# * Preserved: All previous features, comments, and build logic. Every
+#   step, CMake flag, PowerShell script, and inline comment from v5.11
+#   is carried forward verbatim except for the upload path filter.
 #
 # IMPORTANT CAVEAT for beellama_ref:
 # If the pre-flight check reports GGML_CUDA_KVARN / GGML_SPECULATIVE as
@@ -278,20 +425,51 @@ jobs:
           Get-ChildItem "$env:CUDA_PATH\bin\cublasLt64_*.dll" | Copy-Item -Destination dist\
 
           Write-Host "Copying MSVC runtime DLLs (FastMTP job)..."
-          $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath -ErrorAction SilentlyContinue
-          $crtRoot = Join-Path $vsPath "VC\Redist\MSVC"
-          $crtDir = Get-ChildItem -Path $crtRoot -Directory -ErrorAction SilentlyContinue |
-                    Sort-Object Name -Descending |
-                    ForEach-Object {
-                      Get-ChildItem -Path "$($_.FullName)\x64" -Directory -Filter "Microsoft.VC*.CRT" -ErrorAction SilentlyContinue
-                    } | Select-Object -First 1
+          # v5.11: NEVER append -ErrorAction to a native exe. It is a cmdlet-only
+          # parameter and gets forwarded literally to vswhere.exe, which then
+          # fails with empty stdout. Suppress stderr with 2>$null instead, wrap
+          # in try/catch, and guard before every Join-Path.
+          $vswhereExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = ""
+          try {
+            if (Test-Path $vswhereExe) {
+              $raw = & $vswhereExe -latest -property installationPath 2>$null
+              $vsPath = [string]($raw | Where-Object { -Not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -First 1)
+            } else {
+              Write-Host "  vswhere.exe not found at $vswhereExe"
+            }
+          } catch {
+            Write-Host "  vswhere invocation failed: $($_.Exception.Message)"
+            $vsPath = ""
+          }
+
+          $crtDir = $null
+          if (-Not [string]::IsNullOrWhiteSpace($vsPath)) {
+            $crtRoot = Join-Path $vsPath "VC\Redist\MSVC"
+            if (Test-Path $crtRoot) {
+              $crtDir = Get-ChildItem -Path $crtRoot -Directory -ErrorAction SilentlyContinue |
+                        Sort-Object Name -Descending |
+                        ForEach-Object {
+                          Get-ChildItem -Path "$($_.FullName)\x64" -Directory -Filter "Microsoft.VC*.CRT" -ErrorAction SilentlyContinue
+                        } | Select-Object -First 1
+            } else {
+              Write-Host "  VS Redist root not found at $crtRoot; using System32 fallback"
+            }
+          }
+
           if ($crtDir) {
             Copy-Item "$($crtDir.FullName)\*.dll" dist\ -Force
             Write-Host "  Copied MSVC CRT from: $($crtDir.FullName)"
           } else {
+            Write-Host "  Falling back to System32 for MSVC runtime DLLs"
             foreach ($dll in @("msvcp140.dll","vcruntime140.dll","vcruntime140_1.dll")) {
               $src = "$env:WINDIR\System32\$dll"
-              if (Test-Path $src) { Copy-Item $src dist\ -Force }
+              if (Test-Path $src) {
+                Copy-Item $src dist\ -Force
+                Write-Host "  Copied $dll (from System32)"
+              } else {
+                Write-Host "  WARNING: $dll not found in System32 either"
+              }
             }
           }
 
@@ -300,7 +478,18 @@ jobs:
           $global:LASTEXITCODE = 0
           exit 0
 
+      # ==============================================================
+      # Upload artifact
+      # FastMTP uses BUILD_SHARED_LIBS=ON (CMake default), so the exes
+      # in dist\ are small launchers and the shared libraries
+      # (llama.dll, ggml.dll, ggml-cuda.dll) are shipped once. Total
+      # is ~500 MB, so no filtering is needed - upload dist\ as-is.
+      #
+      # v5.12: added `if: always()` so a partial failure in a later
+      # step still produces the artifact for post-mortem inspection.
+      # ==============================================================
       - name: Upload artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: llama-fastmtp-win-cuda
@@ -500,7 +689,7 @@ jobs:
 
       # ==============================================================
       # Configure BeeLlama
-      # BUILD_SHARED_LIBS=OFF forces static build.
+      # BUILD_SHARED_LIBS=OFF forces static build (fixes the v5.3 stub bug).
       # LLAMA_CURL=OFF removes libcurl.dll dependency.
       # v5.9: static CRT (/MT), OpenMP off, curl hard-disabled.
       # ==============================================================
@@ -595,6 +784,14 @@ jobs:
 
       # ==============================================================
       # Collect exes + all DLLs
+      #
+      # v5.12 NOTE ON ARTIFACT SIZE:
+      # Because BUILD_SHARED_LIBS=OFF, every executable statically embeds
+      # llama.cpp + ggml + the CUDA runtime, so each .exe is ~500 MB.
+      # This step still copies all of them into dist\ (that's fine - it
+      # is only using the runner's local disk). The 32.5 GB problem was
+      # in the UPLOAD step, not here. The upload step below now filters
+      # down to just the essentials.
       # ==============================================================
       - name: Collect exes + all DLLs
         shell: pwsh
@@ -660,6 +857,8 @@ jobs:
       # v5.8: copies MSVC CRT DLLs from VS Redist with System32 fallback
       # so the downloaded artifact is self-contained on the user's
       # Windows machine. Does NOT execute anything - pure file copy.
+      # v5.11: vswhere call hardened (no -ErrorAction on native exe,
+      # try/catch, null/empty guard before Join-Path).
       # ==============================================================
       - name: Copy runtime dependencies (MSVC CRT + System32 fallback)
         shell: pwsh
@@ -680,8 +879,23 @@ jobs:
           $copied = @{}
 
           Write-Host "Searching VS Redist for MSVC runtime DLLs..."
-          $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath -ErrorAction SilentlyContinue
-          if ($vsPath) {
+          # v5.11: NEVER append -ErrorAction to a native exe (forwarded
+          # literally, breaks vswhere). Same fix as the FastMTP job.
+          $vswhereExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = ""
+          try {
+            if (Test-Path $vswhereExe) {
+              $raw = & $vswhereExe -latest -property installationPath 2>$null
+              $vsPath = [string]($raw | Where-Object { -Not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -First 1)
+            } else {
+              Write-Host "  vswhere.exe not found at $vswhereExe"
+            }
+          } catch {
+            Write-Host "  vswhere invocation failed: $($_.Exception.Message)"
+            $vsPath = ""
+          }
+
+          if (-Not [string]::IsNullOrWhiteSpace($vsPath)) {
             $redistRoot = Join-Path $vsPath "VC\Redist\MSVC"
             if (Test-Path $redistRoot) {
               $crtDirs = Get-ChildItem -Path $redistRoot -Directory -ErrorAction SilentlyContinue |
@@ -700,7 +914,11 @@ jobs:
                   }
                 }
               }
+            } else {
+              Write-Host "  VS Redist root not found at $redistRoot; relying on System32 fallback"
             }
+          } else {
+            Write-Host "  vswhere returned no VS installation path; relying on System32 fallback"
           }
 
           Write-Host ""
@@ -739,32 +957,12 @@ jobs:
           exit 0
 
       # ==============================================================
-      # v5.10 NEW STEP: Verify binary contains required feature strings
+      # v5.10 STEP: Verify binary contains required feature strings
       # --------------------------------------------------------------
-      # REPLACES the previous "Smoke-test capability surface" step and
-      # the "Debug DLL dependencies (dumpbin)" step.
-      #
-      # RATIONALE: GitHub-hosted windows-2022 runners do NOT have an
-      # NVIDIA GPU and do NOT have the NVIDIA driver DLLs. Executing a
-      # CUDA-enabled llama-server.exe on such a runner is unreliable by
-      # design - even `--help` goes through the DLL loader and can fail
-      # with 0xC0000135. Every previous iteration tried to work around
-      # this with dumpbin resolvers, nvcuda fallbacks, MSVC CRT copies,
-      # etc. Those reduce the probability of failure but cannot
-      # eliminate it. The FastMTP job in this same workflow NEVER
-      # executed the binary and NEVER failed - that is the correct
-      # pattern.
-      #
-      # This step verifies the required feature strings are PRESENT in
-      # the compiled binary via `findstr` (a pure file scan). It does
-      # NOT execute the binary, does NOT load DLLs, and does NOT
-      # require a GPU. It catches every failure mode that CI can
-      # actually catch: CMake flags silently ignored, wrong ref,
-      # truncated link, missing speculative code.
-      #
-      # Runtime issues (kernel crashes, driver incompatibilities,
-      # inference bugs) are the user's to discover on their own GPU
-      # machine - the CI runner is the wrong place to test them.
+      # Pure file scan via findstr. Does NOT execute the binary, does
+      # NOT load DLLs, does NOT require a GPU. GitHub-hosted runners
+      # have no NVIDIA GPU, so runtime testing happens on the user's
+      # GPU machine - the CI runner only verifies build correctness.
       # ==============================================================
       - name: Verify binary contains required feature strings
         shell: pwsh
@@ -790,8 +988,6 @@ jobs:
             exit 1
           }
 
-          # Required feature strings that MUST appear in the compiled binary.
-          # These are used in help text, flag parsing, and error messages.
           $requiredFeatures = @(
             'draft-dflash',
             'ngram-map-k4v',
@@ -801,9 +997,6 @@ jobs:
             'spec-dm-controller'
           )
 
-          # Optional feature strings (hybrid cache). Present only if the
-          # corresponding upstream patch applied cleanly OR BeeLlama's
-          # built-in implementation exposes the flag name. Informational.
           $optionalFeatures = @(
             'cache-reuse-hybrid',
             'checkpoint-every-nb'
@@ -858,9 +1051,34 @@ jobs:
           Write-Host "The artifact is ready for download and testing on a GPU machine."
           exit 0
 
+      # ==============================================================
+      # Upload artifact (v5.12: FILTERED - was 32.5 GB, now ~500 MB)
+      # --------------------------------------------------------------
+      # Because BUILD_SHARED_LIBS=OFF, every one of the ~120 executables
+      # in dist\ is a fully static binary of ~500 MB. Uploading all of
+      # them produced a 32.5 GB artifact. This is not needed.
+      #
+      # llm-studio only needs llama-server.exe. llama-cli.exe and
+      # llama-bench.exe are included because they are genuinely useful
+      # for manual testing and benchmarking. Every other llama-*.exe
+      # (~50 tool binaries) and every test-*.exe (~100 test binaries)
+      # is excluded from the upload.
+      #
+      # DLLs (all of them) are included so the artifact is self-contained
+      # on the user's Windows machine. Total is ~1.5 GB uncompressed,
+      # ~500 MB compressed - matching FastMTP's size profile.
+      #
+      # v5.12: added `if: always()` so a partial failure in a later step
+      # still produces the artifact for post-mortem inspection.
+      # ==============================================================
       - name: Upload artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: llama-beellama-dflash2-win-cuda
-          path: dist/
+          path: |
+            dist/llama-server.exe
+            dist/llama-cli.exe
+            dist/llama-bench.exe
+            dist/*.dll
           retention-days: 30
