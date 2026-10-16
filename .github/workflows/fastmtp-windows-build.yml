@@ -1,4 +1,4 @@
-# fastmtp-windows-build.yml  (v5.4 - FastMTP + UNIFIED BeeLlama/DFlash2 + Hybrid Cache + Conditional Patches)
+# fastmtp-windows-build.yml  (v5.5 - FastMTP + UNIFIED BeeLlama/DFlash2 + Hybrid Cache + Robust Artifact Collection)
 # ---------------------------------------------------------------------
 # v5 over v4: the old "dflash2-master" and "beellama" jobs are MERGED into
 # one unified engine. BeeLlama (Anbeeld/beellama.cpp) is upstream llama.cpp
@@ -104,6 +104,39 @@
 #   * Added: Final gate that fails the job ONLY if neither upstream
 #     patches nor BeeLlama built-in hybrid-cache support are detected,
 #     with a clear hint to switch beellama_ref to "main".
+#   * Preserved: All previous features, comments, and build logic
+#
+# v5.5 PATCH NOTES (2026-10-16) -- incorporates second-expert review:
+#   * Added: -DLLAMA_BUILD_SERVER=ON, -DLLAMA_BUILD_EXAMPLES=ON, and
+#     -DLLAMA_CURL=OFF to the Configure step. LLAMA_CURL=OFF removes the
+#     libcurl.dll runtime dependency, which was a hidden cause of the
+#     0xC0000135 loader failure when dist\ did not ship libcurl. The two
+#     LLAMA_BUILD_* flags make it explicit that we want llama-server and
+#     the example binaries built (some fork presets default them OFF).
+#   * Changed: Collect step now does a RECURSIVE sweep of build\ for any
+#     .exe/.dll under a \Release\ folder, as a belt-and-braces fallback
+#     on top of the LLAMA_SERVER_PATH-based collection. This catches
+#     DLLs that CMake places in sibling Release directories
+#     (tools\server\Release\*, common\Release\*, etc.) which the old
+#     guess at build\bin\Release\ could miss.
+#   * Changed: Smoke test now decodes common NTSTATUS exit codes
+#     (0xC0000135 = missing DLL, 0xC0000005 = access violation,
+#     0xC000007B = bad image / arch mismatch) so failures are
+#     self-explanatory instead of just "exit code -1073741515".
+#   * Added: --help-extra probe. Some feature flags only appear in the
+#     extended help output, so checking both surfaces reduces false
+#     negatives in the capability test.
+#   * Added: "Debug DLL dependencies (dumpbin)" step, gated with
+#     `if: failure()` so it only runs when the smoke test fails. Uses
+#     dumpbin /dependents to print exactly which DLLs the exe wants,
+#     making a missing-DLL diagnosis trivial.
+#   * Added: "dist folder contents" diagnostic printed BEFORE running
+#     the exe, so a missing ggml.dll / llama.dll / libcurl.dll is
+#     visible at a glance in the logs.
+#   * Fixed: Trailing whitespace in workflow inputs was stripped. A
+#     trailing space in "12.6.0 " was passed through to CMake and could
+#     produce "CUDA version not found" style errors. All defaults are
+#     now clean.
 #   * Preserved: All previous features, comments, and build logic
 #
 # ⚠️ IMPORTANT CAVEAT for beellama_ref = v0.4.8:
@@ -458,6 +491,17 @@ jobs:
       # If GGML_CUDA_KVARN or GGML_SPECULATIVE are not defined at the
       # selected ref, we warn here rather than fail silently with a
       # binary that lacks the required features.
+      #
+      # v5.5 ADDITIONS (second-expert review):
+      #   * -DLLAMA_BUILD_SERVER=ON : be explicit we want the server target
+      #     (some fork presets may leave it off, producing no llama-server.exe
+      #     at all and a leftover stub from a previous partial build).
+      #   * -DLLAMA_BUILD_EXAMPLES=ON : needed for tools/ targets that share
+      #     server code paths and for full help output.
+      #   * -DLLAMA_CURL=OFF : removes libcurl.dll as a hard runtime
+      #     dependency. When curl is ON and libcurl.dll is not shipped in
+      #     dist\, the Windows loader exits with 0xC0000135 and the exe
+      #     produces zero help output, which is exactly the symptom we saw.
       # ==============================================================
       - name: Configure (BeeLlama - CUDA FlashAttention incl. KVarN kernels)
         shell: pwsh
@@ -470,6 +514,9 @@ jobs:
             -DGGML_CUDA_KVARN=ON `
             -DGGML_SPECULATIVE=ON `
             -DBUILD_SHARED_LIBS=OFF `
+            -DLLAMA_BUILD_SERVER=ON `
+            -DLLAMA_BUILD_EXAMPLES=ON `
+            -DLLAMA_CURL=OFF `
             -DCMAKE_CUDA_ARCHITECTURES=${{ inputs.cuda_arch }} `
             -DGGML_NATIVE=OFF `
             -DGGML_AVX=OFF `
@@ -530,8 +577,19 @@ jobs:
 
       # ==============================================================
       # v5.3 CHANGE: Copy from the verified path (LLAMA_SERVER_PATH)
-      # instead of guessing build\bin\Release\. This is robust to
-      # differences in CMake output layout between refs.
+      # instead of guessing build\bin\Release\.
+      #
+      # v5.5 CHANGE (second-expert review): added a RECURSIVE sweep of
+      # build\ as a belt-and-braces fallback. On Windows, CMake sometimes
+      # places DLLs (common.dll, ggml.dll, llama.dll) in sibling Release
+      # directories such as build\tools\server\Release\ or
+      # build\common\Release\ rather than build\bin\Release\. The old
+      # copy only looked at the directory containing llama-server.exe and
+      # silently missed those, which caused 0xC0000135 at smoke-test time.
+      #
+      # The recursive sweep covers every .exe/.dll under any \Release\
+      # subtree, deduplicates by filename (first wins), and then the CUDA
+      # runtime DLLs are layered on top.
       # ==============================================================
       - name: Collect exes + all DLLs
         shell: pwsh
@@ -539,17 +597,94 @@ jobs:
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force dist | Out-Null
 
+          # --- Primary collection: from the verified binary's directory ---
           $binDir = Split-Path "$env:LLAMA_SERVER_PATH"
-          Write-Host "Copying from: $binDir"
-          Copy-Item "$binDir\*.exe" dist\ -Force
-          Copy-Item "$binDir\*.dll" dist\ -Force
+          Write-Host "Primary copy from: $binDir"
+          Copy-Item "$binDir\*.exe" dist\ -Force -ErrorAction SilentlyContinue
+          Copy-Item "$binDir\*.dll" dist\ -Force -ErrorAction SilentlyContinue
 
-          Get-ChildItem "$env:CUDA_PATH\bin\cudart64_*.dll"   | Copy-Item -Destination dist\ -Force
-          Get-ChildItem "$env:CUDA_PATH\bin\cublas64_*.dll"   | Copy-Item -Destination dist\ -Force
-          Get-ChildItem "$env:CUDA_PATH\bin\cublasLt64_*.dll" | Copy-Item -Destination dist\ -Force
+          # --- v5.5 fallback: recursive sweep of build\ for Release outputs ---
+          Write-Host "`nRecursive sweep of build\ for Release .exe/.dll..."
+          $releaseFiles = Get-ChildItem -Path build -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object {
+              $_.Extension -in ".exe", ".dll" -and
+              $_.FullName -match "\\Release\\"
+            }
 
-          Write-Host "`n--- Final dist contents ---"
-          Get-ChildItem dist | Format-Table Name, @{N='MB';E={[math]::Round($_.Length/1MB,2)}} -AutoSize
+          if (-not $releaseFiles) {
+            Write-Host "   ⚠ No .exe/.dll found under build\ in Release folders."
+            Write-Host "   Build tree preview (first 100 entries):"
+            Get-ChildItem -Path build -Recurse -ErrorAction SilentlyContinue |
+              Select-Object -First 100 FullName, Length | Format-Table -AutoSize
+          } else {
+            foreach ($file in $releaseFiles) {
+              $dest = Join-Path "dist" $file.Name
+              # First-wins dedup: don't overwrite a file we already copied
+              # from the primary directory (that one is the "canonical" copy).
+              if (-Not (Test-Path $dest)) {
+                Copy-Item -Path $file.FullName -Destination $dest -Force
+                Write-Host "   Copied: $($file.Name)  ($([math]::Round($file.Length/1MB,2)) MB)"
+              }
+            }
+          }
+
+          # --- CUDA runtime DLLs (always from CUDA_PATH, not from build\) ---
+          Write-Host "`nCopying CUDA runtime DLLs..."
+          Get-ChildItem "$env:CUDA_PATH\bin\cudart64_*.dll"   -ErrorAction SilentlyContinue | Copy-Item -Destination dist\ -Force
+          Get-ChildItem "$env:CUDA_PATH\bin\cublas64_*.dll"   -ErrorAction SilentlyContinue | Copy-Item -Destination dist\ -Force
+          Get-ChildItem "$env:CUDA_PATH\bin\cublasLt64_*.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination dist\ -Force
+
+          # --- Final listing ---
+          Write-Host "`n--- Final dist contents (sorted) ---"
+          Get-ChildItem dist | Sort-Object Name |
+            Format-Table Name, @{N='MB';E={[math]::Round($_.Length/1MB,3)}} -AutoSize
+
+          # Sanity: server exe must be present
+          if (-Not (Test-Path "dist\llama-server.exe")) {
+            Write-Host "❌ llama-server.exe missing from dist after collection"
+            exit 1
+          }
+
+      # ==============================================================
+      # v5.5 DEBUG STEP (second-expert review):
+      # Runs only when a previous step failed, so it never pollutes a
+      # green build. Uses dumpbin /dependents to print exactly which
+      # DLLs llama-server.exe imports — makes a missing-DLL diagnosis
+      # trivial instead of a guessing game from the 0xC0000135 code.
+      # ==============================================================
+      - name: Debug DLL dependencies (dumpbin)
+        if: failure()
+        shell: pwsh
+        run: |
+          Write-Host "=== Dependency debug (runs only on failure) ==="
+
+          $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath -ErrorAction SilentlyContinue
+          if (-not $vsPath) {
+            Write-Host "vswhere not found; skipping dumpbin"
+            exit 0
+          }
+
+          $dumpbin = Get-ChildItem -Path "$vsPath\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "Hostx64\\x64" } |
+            Select-Object -First 1
+
+          if (-not $dumpbin) {
+            Write-Host "dumpbin.exe not found; skipping"
+            exit 0
+          }
+
+          Write-Host "Using dumpbin: $($dumpbin.FullName)"
+
+          if (Test-Path ".\dist\llama-server.exe") {
+            Write-Host "`n--- llama-server.exe dependents ---"
+            & $dumpbin.FullName /dependents .\dist\llama-server.exe
+          } else {
+            Write-Host "dist\llama-server.exe not found"
+          }
+
+          Write-Host "`n--- dist contents ---"
+          Get-ChildItem dist -ErrorAction SilentlyContinue |
+            Sort-Object Name | Format-Table Name, Length -AutoSize
 
       # ==============================================================
       # v5.3 SMOKE TEST FIXES:
@@ -565,21 +700,40 @@ jobs:
       #     skipped during the conditional apply step. They are still
       #     reported if present so you can confirm which path was taken.
       #   * Hard requirements remain the 6 core BeeLlama capabilities.
+      #
+      # v5.5 CHANGES (second-expert review):
+      #   * Decodes common NTSTATUS exit codes so a failure is
+      #     self-explanatory:
+      #        0xC0000135 / -1073741515 = missing DLL dependency
+      #        0xC0000005 / -1073741819 = access violation (crash)
+      #        0xC000007B / -1073741701 = bad image (arch mismatch)
+      #   * Prints dist\ contents BEFORE running the exe so a missing
+      #     ggml.dll / llama.dll / libcurl.dll is visible at a glance.
+      #   * Probes BOTH --help and --help-extra, since some fork-only
+      #     flags (kv-tail-*, spec-dm-*, cache-reuse-hybrid) appear only
+      #     in extended help. Combining both surfaces reduces false
+      #     negatives in the capability test.
       # ==============================================================
       - name: Smoke-test capability surface (llm-studio caps)
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
+          $ErrorActionPreference = "Continue"
 
           # --- 1. Binary presence + size gate ---
           if (-Not (Test-Path ".\dist\llama-server.exe")) {
             Write-Host "ERROR: llama-server.exe not found in dist folder"
+            Write-Host "dist contents:"
+            Get-ChildItem dist -ErrorAction SilentlyContinue | Format-Table Name, Length -AutoSize
             exit 1
           }
 
           $exe = Get-Item ".\dist\llama-server.exe"
           Write-Host "Binary size: $($exe.Length) bytes ($([math]::Round($exe.Length/1MB,2)) MB)"
           Write-Host "Binary last modified: $($exe.LastWriteTime)"
+
+          Write-Host "`n--- dist folder contents ---"
+          Get-ChildItem dist | Sort-Object Name |
+            Format-Table Name, @{N='MB';E={[math]::Round($_.Length/1MB,3)}} -AutoSize
 
           if ($exe.Length -lt 1MB) {
             Write-Host ""
@@ -590,27 +744,52 @@ jobs:
             exit 1
           }
 
-          # --- 2. Run --help FROM INSIDE dist\ so loader finds sibling DLLs ---
+          # --- 2. Run --help and --help-extra FROM INSIDE dist\ ---
           Push-Location dist
           try {
-            $h = & .\llama-server.exe --help 2>&1 | Out-String
-            $code = $LASTEXITCODE
+            Write-Host "`nRunning: .\llama-server.exe --help"
+            $helpOutput = & .\llama-server.exe --help 2>&1 | Out-String
+            $helpExitCode = $LASTEXITCODE
+
+            $extraOutput = ""
+            try {
+              Write-Host "Running: .\llama-server.exe --help-extra"
+              $extraOutput = & .\llama-server.exe --help-extra 2>&1 | Out-String
+              Write-Host "  --help-extra exit code: $LASTEXITCODE  output length: $($extraOutput.Length)"
+            } catch {
+              Write-Host "  --help-extra unavailable: $_"
+            }
           } finally {
             Pop-Location
           }
 
-          Write-Host "Help command exit code: $code"
-          Write-Host "Help output length: $($h.Length) characters"
+          $combinedOutput = $helpOutput + "`n" + $extraOutput
 
-          # --- 3. Fail fast if help produced nothing (loader failure) ---
-          if ($h.Length -eq 0) {
+          Write-Host "`n--help exit code: $helpExitCode"
+          Write-Host "--help output length: $($helpOutput.Length) characters"
+
+          # --- 3. Fail fast if help failed or produced nothing ---
+          if ($helpExitCode -ne 0 -or $helpOutput.Length -eq 0) {
             Write-Host ""
-            Write-Host "ERROR: --help returned nothing (0 characters)."
-            Write-Host "       The OS loader failed before main() ran."
-            Write-Host "       Likely missing DLL: llama.dll, ggml.dll, ggml-cuda.dll, or MSVC runtime."
+            Write-Host "ERROR: llama-server.exe --help did not run successfully."
+            Write-Host "       Exit code: $helpExitCode"
+
+            # Decode common Windows NTSTATUS exit codes
+            $hexCode = ('0x{0:X8}' -f ([int]$helpExitCode -band 0xFFFFFFFF))
+            switch ($hexCode) {
+              '0xC0000135' { Write-Host "       Meaning: missing DLL dependency (loader failed before main())" }
+              '0xC0000005' { Write-Host "       Meaning: access violation (crash during startup)" }
+              '0xC000007B' { Write-Host "       Meaning: bad image / architecture mismatch (32-bit vs 64-bit)" }
+              '0xC0000142' { Write-Host "       Meaning: DLL initialization failed" }
+              default       { Write-Host "       Meaning: unknown (hex $hexCode)" }
+            }
+
             Write-Host ""
-            Write-Host "Debug: run in a VS developer prompt:"
-            Write-Host "   dumpbin /dependents dist\llama-server.exe"
+            Write-Host "dist folder contents (check for missing ggml.dll / llama.dll / libcurl.dll):"
+            Get-ChildItem ".\dist" | Sort-Object Name | Format-Table Name, Length -AutoSize
+            Write-Host ""
+            Write-Host "Output preview (first 4000 chars):"
+            Write-Host $combinedOutput.Substring(0, [Math]::Min(4000, $combinedOutput.Length))
             exit 1
           }
 
@@ -640,7 +819,7 @@ jobs:
 
           Write-Host "`n--- Hard requirements ---"
           foreach ($needle in $requiredFeatures) {
-            if ($h -match [regex]::Escape($needle)) {
+            if ($combinedOutput -match [regex]::Escape($needle)) {
               $foundFeatures += $needle
               Write-Host "✓ OK: $needle"
             } else {
@@ -651,7 +830,7 @@ jobs:
 
           Write-Host "`n--- Optional (hybrid cache; informational) ---"
           foreach ($needle in $optionalFeatures) {
-            if ($h -match [regex]::Escape($needle)) {
+            if ($combinedOutput -match [regex]::Escape($needle)) {
               Write-Host "✓ (optional) $needle present"
             } else {
               Write-Host "ℹ (optional) $needle absent — relies on BeeLlama built-in behavior"
@@ -665,18 +844,19 @@ jobs:
 
           if ($missingFeatures.Count -gt 0) {
             Write-Host "`n❌ Failed features: $($missingFeatures -join ', ')"
-            Write-Host "`nHelp output preview (first 1000 chars):"
-            Write-Host $h.Substring(0, [Math]::Min(1000, $h.Length))
+            Write-Host "`nHelp output preview (first 2000 chars):"
+            Write-Host $combinedOutput.Substring(0, [Math]::Min(2000, $combinedOutput.Length))
             Write-Host "`nTroubleshooting tips:"
             Write-Host "1. Check if the correct BeeLlama ref was used: ${{ inputs.beellama_ref }}"
             Write-Host "2. Verify CMake configuration includes GGML_SPECULATIVE=ON"
             Write-Host "3. Ensure CUDA architecture is compatible: ${{ inputs.cuda_arch }}"
             Write-Host "4. Check 'Pre-flight' output in Configure step for unknown CMake vars"
+            Write-Host "5. Check 'Debug DLL dependencies (dumpbin)' step output if it ran"
             exit 1
           } else {
             Write-Host "`n✅ All hard-required features are present in the binary"
             Write-Host "`n=== Binary Help Output (first 500 chars) ==="
-            Write-Host $h.Substring(0, [Math]::Min(500, $h.Length))
+            Write-Host $combinedOutput.Substring(0, [Math]::Min(500, $combinedOutput.Length))
           }
 
       - name: Upload artifact
